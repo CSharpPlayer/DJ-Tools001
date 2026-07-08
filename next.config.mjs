@@ -1,10 +1,9 @@
 /** @type {import('next').NextConfig} */
-const isGitHubPages = process.env.GITHUB_PAGES === "true";
-const githubPagesBasePath = "/DJ-Tools001";
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
 
 const nextConfig = {
-  assetPrefix: isGitHubPages ? `${githubPagesBasePath}/` : undefined,
-  basePath: isGitHubPages ? githubPagesBasePath : undefined,
+  assetPrefix: basePath ? `${basePath}/` : undefined,
+  basePath: basePath || undefined,
   output: "export",
   reactStrictMode: true
 };

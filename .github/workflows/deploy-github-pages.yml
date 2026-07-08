@@ -37,8 +37,6 @@ jobs:
 
       - name: Build static site
         run: pnpm build
-        env:
-          GITHUB_PAGES: "true"
 
       - name: Disable Jekyll
         run: touch out/.nojekyll
