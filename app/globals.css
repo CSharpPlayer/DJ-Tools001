@@ -1,0 +1,111 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #030506;
+  color: #f6f8fb;
+  font-family:
+    "Inter",
+    "PingFang SC",
+    "Microsoft YaHei",
+    "Noto Sans CJK SC",
+    sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.matte-flow {
+  background:
+    radial-gradient(circle at 15% 18%, rgba(45, 212, 191, 0.18), transparent 28%),
+    radial-gradient(circle at 80% 8%, rgba(99, 102, 241, 0.18), transparent 26%),
+    radial-gradient(circle at 60% 88%, rgba(244, 114, 182, 0.12), transparent 30%),
+    linear-gradient(135deg, #020405 0%, #090b0f 48%, #05080a 100%);
+}
+
+.silk-line {
+  position: absolute;
+  inset: -35%;
+  background:
+    linear-gradient(115deg, transparent 35%, rgba(255, 255, 255, 0.08) 48%, transparent 62%),
+    linear-gradient(125deg, transparent 42%, rgba(45, 212, 191, 0.12) 50%, transparent 58%);
+  filter: blur(8px);
+  opacity: 0.55;
+  transform: rotate(-8deg);
+  animation: silkMove 14s ease-in-out infinite alternate;
+}
+
+@keyframes silkMove {
+  from {
+    transform: translate3d(-3%, -2%, 0) rotate(-8deg);
+  }
+  to {
+    transform: translate3d(4%, 3%, 0) rotate(-3deg);
+  }
+}
+
+.panel {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(9, 12, 16, 0.72);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(22px);
+}
+
+.gradient-button {
+  background:
+    linear-gradient(#10151b, #10151b) padding-box,
+    linear-gradient(135deg, #34d399, #22d3ee, #a78bfa, #f472b6) border-box;
+  border: 1px solid transparent;
+  box-shadow:
+    0 16px 38px rgba(34, 211, 238, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    filter 180ms ease;
+}
+
+.gradient-button:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.08);
+  box-shadow:
+    0 20px 48px rgba(52, 211, 153, 0.2),
+    0 0 26px rgba(34, 211, 238, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+.field {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.055);
+  color: #f8fafc;
+  outline: none;
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    background 180ms ease;
+}
+
+.field:focus {
+  border-color: rgba(45, 212, 191, 0.58);
+  background: rgba(255, 255, 255, 0.075);
+  box-shadow: 0 0 0 4px rgba(45, 212, 191, 0.1);
+}
