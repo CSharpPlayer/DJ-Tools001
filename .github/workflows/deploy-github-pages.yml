@@ -37,8 +37,6 @@ jobs:
 
       - name: Build static site
         run: pnpm build
-        env:
-          NEXT_PUBLIC_BASE_PATH: /DJ-Tools001
 
       - name: Disable Jekyll
         run: touch out/.nojekyll
