@@ -1,0 +1,66 @@
+[
+  {
+    "id": "third-li-xiangkun",
+    "name": "李翔鲲",
+    "position": "网管员兼党建专员",
+    "work": "负责库区网络系统运维、信息设备与网络安全管理，同步承担党建材料撰写、党员大会会务保障、党员日常管理等党务工作。",
+    "wordCount": "60 字左右",
+    "isHost": false
+  },
+  {
+    "id": "third-chen-guohui",
+    "name": "陈国辉",
+    "position": "食堂管理员",
+    "work": "负责库区职工食堂日常管理、食材采购与成本管控、食品安全管控、就餐服务保障，落实食堂卫生与餐饮规范要求。",
+    "wordCount": "60 字左右",
+    "isHost": false
+  },
+  {
+    "id": "third-wang-yunsong",
+    "name": "王云松",
+    "position": "仓储保管员兼班组长",
+    "work": "负责责任仓房日常粮情检测、储粮作业实施，统筹班组人员与作业调度，带头落实仓储规范化管理要求。",
+    "wordCount": "60 字左右",
+    "isHost": false
+  },
+  {
+    "id": "third-zhao-zhiguo",
+    "name": "赵志国",
+    "position": "安全员",
+    "work": "负责库区安全生产日常巡查、隐患排查整改、安全培训与应急演练组织，落实各项安全管理制度，筑牢库区安全防线。",
+    "wordCount": "60 字左右",
+    "isHost": false
+  },
+  {
+    "id": "third-niu-jingkui",
+    "name": "牛井奎",
+    "position": "综合科长",
+    "work": "主持综合科全面工作，统筹行政后勤、人事劳资、公文流转、事务协调，保障分库日常政务与后勤运转顺畅。",
+    "wordCount": "60 字左右",
+    "isHost": false
+  },
+  {
+    "id": "third-li-fenghua",
+    "name": "李风华",
+    "position": "仓储科长",
+    "work": "主持仓储科全面工作，统筹粮情管控、仓储规范化建设、储粮技术落地，督导仓房日常管理，保障库存粮食储存安全。",
+    "wordCount": "60 字左右",
+    "isHost": false
+  },
+  {
+    "id": "third-xu-yanjie",
+    "name": "许艳杰",
+    "position": "仓储统计员",
+    "work": "负责仓储业务数据统计、粮情台账更新、库存账实核对，规范报送各类仓储报表，保障统计数据准确完整、账实相符。",
+    "wordCount": "60 字左右",
+    "isHost": false
+  },
+  {
+    "id": "third-li-wanzhuang",
+    "name": "李万庄",
+    "position": "党支部书记兼分库总经理",
+    "work": "主持党支部全面工作，牵头抓党建引领、党员教育管理、党风廉政建设，推动党建与储粮业务深度融合，统筹支部各项工作开展。",
+    "wordCount": "100 字左右",
+    "isHost": true
+  }
+]
