@@ -8,21 +8,55 @@ import {
   Packer,
   PageOrientation,
   Paragraph,
+  Tab,
+  TabStopType,
   TextRun
 } from "docx";
 import JSZip from "jszip";
-import { ChangeEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 
 type TopicKind = "first" | "other";
 type MeetingKind = "party" | "committee";
-type ViewMode = "main" | "preview" | "personnel" | "prompt";
+type ViewMode = "ledger" | "main" | "preview" | "personnel" | "prompt" | "templates";
+type PreviewReturnMode = "ledger" | "main";
+type TemplateReturnMode = "ledger" | "main" | "preview";
 type BranchName = "第一党支部" | "第二党支部" | "第三党支部";
 type MeetingLineVariant = "body" | "main" | "second" | "third";
+type TemplateModuleCategory = "meeting" | "agenda" | "host" | "material" | "speech";
+type TemplateModuleKind =
+  | "meeting-info"
+  | "agenda-list"
+  | "host-opening"
+  | "party-first-file-title"
+  | "party-first-file-content"
+  | "party-second-file-title"
+  | "party-second-file-content"
+  | "party-later-file-title"
+  | "party-later-file-content"
+  | "party-exchange"
+  | "committee-first-topic-title"
+  | "committee-first-file-title"
+  | "committee-first-exchange"
+  | "committee-second-topic-title"
+  | "committee-second-file-title"
+  | "committee-second-exchange"
+  | "committee-later-topic-title"
+  | "committee-later-file-title"
+  | "committee-later-exchange";
+type MeetingTemplateState = Record<MeetingKind, TemplateModuleKind[]>;
 
 type TopicEntry = {
   id: string;
   title: string;
   content: string;
+};
+
+type AgendaGroup = {
+  columnIndex: number;
+  title: string;
+  sourceText: string;
+  uploads: TopicEntry[];
+  isFirstAgenda: boolean;
 };
 
 type MeetingLine = {
@@ -32,14 +66,57 @@ type MeetingLine = {
   alignment?: (typeof AlignmentType)[keyof typeof AlignmentType];
   blank?: boolean;
   firstLine?: boolean;
+  rightTab?: boolean;
   role?: "base" | "discussion" | "speech" | "closing";
   hostTemplate?: string;
+  discussionKey?: string;
+  discussionLabel?: string;
 };
 
 type MeetingPreview = {
   kind: MeetingKind;
   baseLines: MeetingLine[];
   lines: MeetingLine[];
+  sourceLabel?: string;
+  promptSupplement?: string;
+};
+
+type LedgerCell = {
+  id: string;
+  header: string;
+  sourceText: string;
+  topics: TopicEntry[];
+};
+
+type LedgerRow = {
+  id: string;
+  sourceRowNumber: number;
+  date: string;
+  nature: string;
+  cells: LedgerCell[];
+};
+
+type LedgerWorkbook = {
+  name: string;
+  dateHeader: string;
+  natureHeader: string;
+  interactiveHeaders: string[];
+  sourceMatrix: string[][];
+  headerRowIndex: number;
+  dateColumnIndex: number;
+  natureColumnIndex: number;
+  rows: LedgerRow[];
+};
+
+type ImportedWorkbookSheet = {
+  id: string;
+  name: string;
+  matrix: string[][];
+};
+
+type XlsxCellFormats = {
+  numFmtCodes: Map<number, string>;
+  styleNumFmtIds: number[];
 };
 
 type PersonnelEntry = {
@@ -49,6 +126,7 @@ type PersonnelEntry = {
   work: string;
   wordCount: string;
   isHost: boolean;
+  isCommitteeMember: boolean;
 };
 
 type PersonnelForm = Omit<PersonnelEntry, "id">;
@@ -119,6 +197,59 @@ const fontOptions = [
 ];
 
 const cnNumber = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
+const fixedCommitteeAgendaTitles = [
+  "传达学习习近平总书记系列重要讲话和重要会议精神；",
+  "研究确定本月三会一课学习计划事宜。"
+];
+const templateConfigStorageKey = "meeting-record-template-modules";
+const templateModuleInfo: Record<TemplateModuleKind, { label: string; description: string; category: TemplateModuleCategory }> = {
+  "meeting-info": { label: "会议情况说明", description: "会议名称、时间地点、参会人员、主持人与记录人", category: "meeting" },
+  "agenda-list": { label: "议题", description: "会议议题名称与编号", category: "agenda" },
+  "host-opening": { label: "主持人发言", description: "主持人宣布进入议题", category: "host" },
+  "party-first-file-title": { label: "第一议题文件标题", description: "第一议题的每个上传文件标题，黑体三号", category: "material" },
+  "party-first-file-content": { label: "第一议题提取内容", description: "第一议题文件的提取正文", category: "material" },
+  "party-second-file-title": { label: "第二议题文件标题", description: "第二议题的每个上传文件标题，黑体三号", category: "material" },
+  "party-second-file-content": { label: "第二议题提取内容", description: "第二议题文件的提取正文", category: "material" },
+  "party-later-file-title": { label: "后续议题文件标题", description: "第三及后续议题的每个文件标题，黑体三号", category: "material" },
+  "party-later-file-content": { label: "后续议题提取内容", description: "第三及后续议题文件的提取正文", category: "material" },
+  "party-exchange": { label: "交流发言部分", description: "主持人交流提示与豆包生成的发言", category: "speech" },
+  "committee-first-topic-title": { label: "第一议题标题", description: "固定为传达学习习近平总书记系列重要讲话和重要会议精神", category: "agenda" },
+  "committee-first-file-title": { label: "第一议题文件标题", description: "第一议题每个上传文件的二级标题", category: "material" },
+  "committee-first-exchange": { label: "第一议题交流发言", description: "紧随第一议题每个文件标题，插入该文件的交流发言", category: "speech" },
+  "committee-second-topic-title": { label: "第二议题标题", description: "固定为研究确定本月三会一课学习计划事宜", category: "agenda" },
+  "committee-second-file-title": { label: "第二议题文件标题", description: "第二议题每个上传文件的二级标题", category: "material" },
+  "committee-second-exchange": { label: "第二议题交流发言", description: "紧随第二议题每个文件标题，插入该文件的交流发言", category: "speech" },
+  "committee-later-topic-title": { label: "后续议题标题", description: "对应台账第三至第七个议题列", category: "agenda" },
+  "committee-later-file-title": { label: "后续议题文件标题", description: "后续议题每个上传文件的二级标题", category: "material" },
+  "committee-later-exchange": { label: "后续议题交流发言", description: "紧随每个后续文件标题，插入该文件的交流发言", category: "speech" }
+};
+const defaultMeetingTemplates: MeetingTemplateState = {
+  party: [
+    "meeting-info",
+    "agenda-list",
+    "host-opening",
+    "party-first-file-title",
+    "party-first-file-content",
+    "party-second-file-title",
+    "party-second-file-content",
+    "party-later-file-title",
+    "party-later-file-content",
+    "party-exchange"
+  ],
+  committee: [
+    "meeting-info",
+    "agenda-list",
+    "committee-first-topic-title",
+    "committee-first-file-title",
+    "committee-first-exchange",
+    "committee-second-topic-title",
+    "committee-second-file-title",
+    "committee-second-exchange",
+    "committee-later-topic-title",
+    "committee-later-file-title",
+    "committee-later-exchange"
+  ]
+};
 const minBodyParagraphLength = 80;
 const targetExtractLength = 120;
 const branchNames: BranchName[] = ["第一党支部", "第二党支部", "第三党支部"];
@@ -138,7 +269,8 @@ const emptyPersonnelForm: PersonnelForm = {
   position: "",
   work: "",
   wordCount: "60 字左右",
-  isHost: false
+  isHost: false,
+  isCommitteeMember: false
 };
 const emptyPromptForm: PromptForm = {
   name: "",
@@ -170,8 +302,22 @@ export default function Home() {
   const [format, setFormat] = useState<FormatSettings>(defaultFormat);
   const [showFormat, setShowFormat] = useState(false);
   const [showComposeMenu, setShowComposeMenu] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("main");
-  const [preview, setPreview] = useState<MeetingPreview | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("ledger");
+  const [templateReturnMode, setTemplateReturnMode] = useState<TemplateReturnMode>("ledger");
+  const [meetingTemplates, setMeetingTemplates] = useState<MeetingTemplateState>(defaultMeetingTemplates);
+  const [previews, setPreviews] = useState<MeetingPreview[]>([]);
+  const [activePreviewIndex, setActivePreviewIndex] = useState(0);
+  const [previewReturnMode, setPreviewReturnMode] = useState<PreviewReturnMode>("main");
+  const [activeDiscussionKey, setActiveDiscussionKey] = useState("");
+  const preview = previews[activePreviewIndex] ?? null;
+  const [ledgerFileName, setLedgerFileName] = useState("");
+  const [ledgerSheets, setLedgerSheets] = useState<ImportedWorkbookSheet[]>([]);
+  const [ledgerWorkbooks, setLedgerWorkbooks] = useState<Record<string, LedgerWorkbook>>({});
+  const [ledgerSheetErrors, setLedgerSheetErrors] = useState<Record<string, string>>({});
+  const [activeLedgerSheetId, setActiveLedgerSheetId] = useState("");
+  const ledgerWorkbook = activeLedgerSheetId ? ledgerWorkbooks[activeLedgerSheetId] ?? null : null;
+  const [selectedLedgerRows, setSelectedLedgerRows] = useState<string[]>([]);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
   const [activeBranch, setActiveBranch] = useState<BranchName>("第三党支部");
   const [personnel, setPersonnel] = useState<PersonnelState>(emptyPersonnelState);
   const [selectedPersonnel, setSelectedPersonnel] = useState<SelectionState>(emptySelectionState);
@@ -182,13 +328,16 @@ export default function Home() {
   const [promptForm, setPromptForm] = useState<PromptForm>(emptyPromptForm);
   const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
   const [lastPrompt, setLastPrompt] = useState("");
+  const [lastPromptDiscussionKey, setLastPromptDiscussionKey] = useState("");
   const [speechResultText, setSpeechResultText] = useState("");
   const [statusNotice, setStatusNotice] = useState<StatusNotice | null>(null);
   const firstInputRef = useRef<HTMLInputElement>(null);
   const otherInputRef = useRef<HTMLInputElement>(null);
   const personnelImportRef = useRef<HTMLInputElement>(null);
   const promptImportRef = useRef<HTMLInputElement>(null);
+  const ledgerWorkbookInputRef = useRef<HTMLInputElement>(null);
   const previewScrollTopRef = useRef<number | null>(null);
+  const ledgerScrollTopRef = useRef<number | null>(null);
 
   function setStatus(message: string) {
     setStatusNotice({
@@ -212,9 +361,21 @@ export default function Home() {
   }, [viewMode]);
 
   useEffect(() => {
+    setMeetingTemplates(loadMeetingTemplateState());
+  }, []);
+
+  useEffect(() => {
     if (viewMode === "preview" && previewScrollTopRef.current !== null) {
       const top = previewScrollTopRef.current;
       previewScrollTopRef.current = null;
+      requestAnimationFrame(() => window.scrollTo({ top, behavior: "auto" }));
+    }
+  }, [viewMode]);
+
+  useEffect(() => {
+    if (viewMode === "ledger" && ledgerScrollTopRef.current !== null) {
+      const top = ledgerScrollTopRef.current;
+      ledgerScrollTopRef.current = null;
       requestAnimationFrame(() => window.scrollTo({ top, behavior: "auto" }));
     }
   }, [viewMode]);
@@ -254,6 +415,65 @@ export default function Home() {
     }
   }
 
+  function openTemplateConfig(returnMode: TemplateReturnMode) {
+    if (returnMode === "preview") {
+      previewScrollTopRef.current = window.scrollY;
+    }
+    setTemplateReturnMode(returnMode);
+    setViewMode("templates");
+  }
+
+  function updateMeetingTemplate(kind: MeetingKind, modules: TemplateModuleKind[]) {
+    const next = { ...meetingTemplates, [kind]: normalizeTemplateModules(kind, modules) };
+    setMeetingTemplates(next);
+    localStorage.setItem(templateConfigStorageKey, JSON.stringify(next));
+  }
+
+  function reorderMeetingTemplate(kind: MeetingKind, source: TemplateModuleKind, target: TemplateModuleKind) {
+    if (source === target) {
+      return;
+    }
+
+    const modules = [...meetingTemplates[kind]];
+    const sourceIndex = modules.indexOf(source);
+    const targetIndex = modules.indexOf(target);
+    if (sourceIndex < 0 || targetIndex < 0) {
+      return;
+    }
+
+    modules.splice(sourceIndex, 1);
+    modules.splice(targetIndex, 0, source);
+    updateMeetingTemplate(kind, modules);
+  }
+
+  function moveMeetingTemplateModule(kind: MeetingKind, module: TemplateModuleKind, direction: -1 | 1) {
+    const modules = [...meetingTemplates[kind]];
+    const index = modules.indexOf(module);
+    const targetIndex = index + direction;
+    if (index < 0 || targetIndex < 0 || targetIndex >= modules.length) {
+      return;
+    }
+
+    [modules[index], modules[targetIndex]] = [modules[targetIndex], modules[index]];
+    updateMeetingTemplate(kind, modules);
+  }
+
+  function resetMeetingTemplate(kind: MeetingKind) {
+    updateMeetingTemplate(kind, defaultMeetingTemplates[kind]);
+    setStatus(`${kind === "party" ? "党员大会" : "支委会"}模板已恢复默认顺序。`);
+  }
+
+  function openMeetingPreviews(items: MeetingPreview[], returnMode: PreviewReturnMode) {
+    setPreviews(items);
+    setActivePreviewIndex(0);
+    setPreviewReturnMode(returnMode);
+    setViewMode("preview");
+    setLastPrompt("");
+    setLastPromptDiscussionKey("");
+    setSpeechResultText("");
+    setActiveDiscussionKey(getDiscussionTargets(items[0]?.baseLines ?? [])[0]?.key ?? "");
+  }
+
   function createMeetingRecord(kind: MeetingKind) {
     const firstEntries = normalizeTopicEntries(firstTopics);
     const otherEntries = normalizeTopicEntries(otherTopics);
@@ -263,11 +483,7 @@ export default function Home() {
       return;
     }
 
-    const baseLines = buildMeetingLines(kind, firstEntries, otherEntries);
-    setPreview({ kind, baseLines, lines: baseLines });
-    setViewMode("preview");
-    setLastPrompt("");
-    setSpeechResultText("");
+    openMeetingPreviews([createMeetingPreview(kind, firstEntries, otherEntries, undefined, undefined, meetingTemplates[kind])], "main");
     setStatus("已生成会议记录预览，可在预览页配置发言人员并生成交流发言。");
   }
 
@@ -279,8 +495,27 @@ export default function Home() {
     setStatus("正在生成 Word 会议记录。");
     const doc = buildMeetingDocumentFromLines(renderMeetingLines(preview.lines, getSelectedHostName(personnel, selectedPersonnel)), format);
     const blob = await Packer.toBlob(doc);
-    downloadBlob(blob, `${preview.kind === "party" ? "党员大会" : "支委会"}会议记录.docx`);
+    downloadBlob(blob, meetingPreviewFileName(preview));
     setStatus("Word 会议记录已生成并开始下载。");
+  }
+
+  async function downloadAllPreviewDocuments() {
+    if (previews.length < 2) {
+      await downloadPreviewDocument();
+      return;
+    }
+
+    setStatus("正在打包生成两份 Word 会议记录。");
+    const zip = new JSZip();
+    const hostName = getSelectedHostName(personnel, selectedPersonnel);
+
+    for (const item of previews) {
+      const doc = buildMeetingDocumentFromLines(renderMeetingLines(item.lines, hostName), format);
+      zip.file(meetingPreviewFileName(item), await Packer.toBlob(doc));
+    }
+
+    downloadBlob(await zip.generateAsync({ type: "blob" }), "台账会议记录.zip");
+    setStatus("两份 Word 会议记录已打包并开始下载。");
   }
 
   function updatePersonnelState(branch: BranchName, entries: PersonnelEntry[]) {
@@ -294,7 +529,8 @@ export default function Home() {
       position: normalizeText(personnelForm.position),
       work: normalizeText(personnelForm.work),
       wordCount: normalizeText(personnelForm.wordCount) || "60 字左右",
-      isHost: personnelForm.isHost
+      isHost: personnelForm.isHost,
+      isCommitteeMember: personnelForm.isCommitteeMember
     };
 
     if (!cleanForm.name) {
@@ -389,7 +625,8 @@ export default function Home() {
       position: person.position,
       work: person.work,
       wordCount: person.wordCount,
-      isHost: person.isHost
+      isHost: person.isHost,
+      isCommitteeMember: person.isCommitteeMember
     });
     setEditingPersonId(person.id);
   }
@@ -405,6 +642,13 @@ export default function Home() {
   function updatePersonHost(branch: BranchName, id: string, isHost: boolean) {
     const next = personnel[branch].map((person) =>
       person.id === id ? { ...person, isHost } : person
+    );
+    updatePersonnelState(branch, next);
+  }
+
+  function updatePersonCommitteeMember(branch: BranchName, id: string, isCommitteeMember: boolean) {
+    const next = personnel[branch].map((person) =>
+      person.id === id ? { ...person, isCommitteeMember } : person
     );
     updatePersonnelState(branch, next);
   }
@@ -454,7 +698,8 @@ export default function Home() {
         position: normalizeText(person.position),
         work: normalizeText(person.work),
         wordCount: normalizeText(person.wordCount) || "60 字左右",
-        isHost: Boolean(person.isHost)
+        isHost: Boolean(person.isHost),
+        isCommitteeMember: Boolean(person.isCommitteeMember)
       })).filter((person) => person.name);
       updatePersonnelState(activeBranch, entries);
       setSelectedPersonnel((current) => ({ ...current, [activeBranch]: [] }));
@@ -483,7 +728,7 @@ export default function Home() {
       return;
     }
 
-    const selected = collectSelectedPersonnel(personnel, selectedPersonnel);
+    const selected = collectMeetingSpeakers(preview.kind, personnel, selectedPersonnel);
 
     if (!selected.length) {
       setStatus("请先勾选需要生成交流发言的人员。");
@@ -498,12 +743,21 @@ export default function Home() {
 
     const hostName = selected.find(({ person }) => person.isHost)?.person.name;
     const activeTemplate = promptTemplates.find((template) => template.id === activePromptId) ?? promptTemplates[0] ?? createDefaultPromptTemplate();
+    const discussionTarget = getDiscussionTargets(preview.baseLines).find((item) => item.key === activeDiscussionKey);
+    const visibleMeetingContent = meetingLinesToPlainText(preview.baseLines, hostName);
+    const meetingContent = preview.promptSupplement
+      ? `${visibleMeetingContent}\n\n【仅供交流发言理解的上传文件提取内容】\n${preview.promptSupplement}`
+      : visibleMeetingContent;
     const prompt = buildDoubaoPrompt(
       formatSelectedPersonnel(selected),
-      meetingLinesToPlainText(preview.baseLines, hostName),
-      activeTemplate.template
+      discussionTarget ? `${meetingContent}\n\n【本次交流发言对应议题】${discussionTarget.label}` : meetingContent,
+      activeTemplate.template,
+      preview.kind === "committee"
+        ? "【支委会交流发言顺序】请严格按发言人员配置的顺序输出：标记为支委的人员依次先发言，主持人最后作总结性发言。"
+        : ""
     );
     setLastPrompt(prompt);
+    setLastPromptDiscussionKey(discussionTarget?.key ?? "");
     setStatus("Prompt 已生成。请复制 Prompt 到豆包网页版，生成后把结果粘贴回来插入预览。");
   }
 
@@ -529,11 +783,308 @@ export default function Home() {
       return;
     }
 
-    setPreview({
-      ...preview,
-      lines: mergeSpeechesIntoMeeting(preview.baseLines, speechParagraphs)
-    });
+    setPreviews((current) =>
+      current.map((item, index) =>
+        index === activePreviewIndex
+          ? {
+              ...item,
+              lines: mergeSpeechesIntoMeeting(item.lines, speechParagraphs, lastPromptDiscussionKey || activeDiscussionKey)
+            }
+          : item
+      )
+    );
     setStatus("已将豆包生成结果插入会议记录预览。");
+  }
+
+  async function importLedgerWorkbookFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    setLedgerLoading(true);
+    setStatus(`正在读取 Excel 文件 ${file.name}。`);
+
+    try {
+      const sheets = await loadWorkbookSheetsFromFile(file);
+      const fileTitle = getFileTitle(file.name);
+      const nextWorkbooks: Record<string, LedgerWorkbook> = {};
+      const nextErrors: Record<string, string> = {};
+
+      sheets.forEach((sheet) => {
+        try {
+          nextWorkbooks[sheet.id] = createLedgerWorkbook(sheet.matrix, `${fileTitle} / ${sheet.name}`);
+        } catch (error) {
+          nextErrors[sheet.id] = error instanceof Error ? error.message : "该工作表无法识别。";
+          nextWorkbooks[sheet.id] = createPlainWorkbook(sheet.matrix, `${fileTitle} / ${sheet.name}`);
+        }
+      });
+
+      const firstCompatibleSheet = sheets.find((sheet) => !nextErrors[sheet.id]);
+      const initialSheet = firstCompatibleSheet ?? sheets[0];
+
+      setLedgerFileName(file.name);
+      setLedgerSheets(sheets);
+      setLedgerWorkbooks(nextWorkbooks);
+      setLedgerSheetErrors(nextErrors);
+      setActiveLedgerSheetId(initialSheet?.id ?? "");
+      setSelectedLedgerRows([]);
+      setStatus(
+        firstCompatibleSheet
+          ? `已导入 ${file.name}，共发现 ${sheets.length} 个工作表，当前打开“${firstCompatibleSheet.name}”。`
+          : `已导入 ${file.name}，但没有工作表包含“日期”和“三会一课性质”表头。`
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Excel 文件读取失败。");
+    } finally {
+      setLedgerLoading(false);
+    }
+  }
+
+  function selectLedgerSheet(sheetId: string) {
+    setActiveLedgerSheetId(sheetId);
+    setSelectedLedgerRows([]);
+
+    const sheet = ledgerSheets.find((item) => item.id === sheetId);
+    const error = ledgerSheetErrors[sheetId];
+    setStatus(error ? `工作表“${sheet?.name ?? sheetId}”无法生成台账：${error}` : `已切换到工作表“${sheet?.name ?? sheetId}”。`);
+  }
+
+  function updateActiveLedgerWorkbook(updater: (workbook: LedgerWorkbook) => LedgerWorkbook) {
+    if (!activeLedgerSheetId) {
+      return;
+    }
+
+    setLedgerWorkbooks((current) => {
+      const workbook = current[activeLedgerSheetId];
+      return workbook ? { ...current, [activeLedgerSheetId]: updater(workbook) } : current;
+    });
+  }
+
+  function updateLedgerCell(rowId: string, cellIndex: number, updater: (cell: LedgerCell) => LedgerCell) {
+    updateActiveLedgerWorkbook((current) => ({
+      ...current,
+      rows: current.rows.map((row) =>
+          row.id === rowId
+            ? {
+                ...row,
+                cells: row.cells.map((cell, index) => (index === cellIndex ? updater(cell) : cell))
+              }
+            : row
+      )
+    }));
+  }
+
+  async function handleLedgerCellFiles(rowId: string, cellIndex: number, files: File[]) {
+    if (!files.length) {
+      return;
+    }
+
+    setStatus(`正在解析 ${files.length} 个议题文件。`);
+
+    try {
+      const kind: TopicKind = cellIndex === 0 ? "first" : "other";
+      const entries: TopicEntry[] = [];
+
+      for (const file of files) {
+        entries.push({
+          id: createId("ledger-topic"),
+          title: getFileTitle(file.name),
+          content: await extractFromFile(file, kind)
+        });
+      }
+
+      updateLedgerCell(rowId, cellIndex, (cell) => ({
+        ...cell,
+        topics: [...cell.topics, ...entries]
+      }));
+      setStatus(`已提取 ${files.length} 个文件，可在单元格中继续编辑。`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "议题文件解析失败。");
+    }
+  }
+
+  function updateLedgerCellSource(rowId: string, cellIndex: number, sourceText: string) {
+    const row = ledgerWorkbook?.rows.find((item) => item.id === rowId);
+    if (!row || !ledgerWorkbook) {
+      return;
+    }
+
+    updateLedgerSourceCell(row.sourceRowNumber - 1, ledgerWorkbook.natureColumnIndex + cellIndex + 1, sourceText);
+  }
+
+  function updateLedgerSourceCell(sourceRowIndex: number, columnIndex: number, value: string) {
+    updateActiveLedgerWorkbook((current) => {
+      const sourceMatrix = current.sourceMatrix.map((sourceRow, rowIndex) => {
+        if (rowIndex !== sourceRowIndex) {
+          return sourceRow;
+        }
+
+        const nextRow = [...sourceRow];
+        nextRow[columnIndex] = value;
+        return nextRow;
+      });
+      const sourceRowNumber = sourceRowIndex + 1;
+      const cellIndex = columnIndex - current.natureColumnIndex - 1;
+      const rows = current.rows.map((row) => {
+        if (row.sourceRowNumber !== sourceRowNumber) {
+          return row;
+        }
+
+        if (columnIndex === current.dateColumnIndex) {
+          return { ...row, date: value };
+        }
+
+        if (columnIndex === current.natureColumnIndex) {
+          return { ...row, nature: value };
+        }
+
+        if (cellIndex >= 0 && cellIndex < 7) {
+          return {
+            ...row,
+            cells: row.cells.map((cell, index) => (index === cellIndex ? { ...cell, sourceText: value } : cell))
+          };
+        }
+
+        return row;
+      });
+
+      return { ...current, sourceMatrix, rows };
+    });
+  }
+
+  function updateLedgerCellTopic(
+    rowId: string,
+    cellIndex: number,
+    topicId: string,
+    patch: Partial<Pick<TopicEntry, "title" | "content">>
+  ) {
+    updateLedgerCell(rowId, cellIndex, (cell) => ({
+      ...cell,
+      topics: cell.topics.map((topic) => (topic.id === topicId ? { ...topic, ...patch } : topic))
+    }));
+  }
+
+  function removeLedgerCellTopic(rowId: string, cellIndex: number, topicId: string) {
+    updateLedgerCell(rowId, cellIndex, (cell) => ({
+      ...cell,
+      topics: cell.topics.filter((topic) => topic.id !== topicId)
+    }));
+  }
+
+  function toggleLedgerRowSelection(rowId: string) {
+    if (!ledgerWorkbook) {
+      return;
+    }
+
+    const row = ledgerWorkbook.rows.find((item) => item.id === rowId);
+    const kind = row ? meetingKindFromNature(row.nature) : null;
+
+    if (!row || !kind) {
+      return;
+    }
+
+    const hasUploads = ledgerRowHasUploads(row);
+    const hasSelectedCommitteeSource = ledgerWorkbook.rows.some(
+      (item) =>
+        selectedLedgerRows.includes(item.id) &&
+        meetingKindFromNature(item.nature) === "committee" &&
+        ledgerRowHasUploads(item)
+    );
+
+    if (!hasUploads && (kind !== "party" || !hasSelectedCommitteeSource)) {
+      return;
+    }
+
+    setSelectedLedgerRows((current) => {
+      if (current.includes(rowId)) {
+        const remaining = current.filter((id) => id !== rowId);
+
+        if (kind === "committee") {
+          return remaining.filter((id) => {
+            const selectedRow = ledgerWorkbook.rows.find((item) => item.id === id);
+            return !selectedRow || meetingKindFromNature(selectedRow.nature) !== "party" || ledgerRowHasUploads(selectedRow);
+          });
+        }
+
+        return remaining;
+      }
+
+      const withoutSameKind = current.filter((id) => {
+        const selectedRow = ledgerWorkbook.rows.find((item) => item.id === id);
+        return selectedRow ? meetingKindFromNature(selectedRow.nature) !== kind : false;
+      });
+
+      return [...withoutSameKind, rowId];
+    });
+  }
+
+  function generateLedgerRow(rowId: string) {
+    if (!ledgerWorkbook) {
+      return;
+    }
+
+    const row = ledgerWorkbook.rows.find((item) => item.id === rowId);
+    const kind = row ? meetingKindFromNature(row.nature) : null;
+
+    if (!row || !kind || !ledgerRowHasUploads(row)) {
+      setStatus("当前行需要标明会议性质，并至少上传一个议题文件。");
+      return;
+    }
+
+    const selectedRows = ledgerWorkbook.rows.filter((item) => selectedLedgerRows.includes(item.id));
+    const selectedCommittee = selectedRows.find(
+      (item) => meetingKindFromNature(item.nature) === "committee" && ledgerRowHasUploads(item)
+    );
+    const selectedParty = selectedRows.find((item) => meetingKindFromNature(item.nature) === "party");
+    const hasPair = selectedLedgerRows.includes(rowId) && Boolean(selectedCommittee && selectedParty);
+
+    let nextPreviews: MeetingPreview[];
+
+    if (hasPair && selectedCommittee && selectedParty) {
+      const agendaGroups = ledgerRowToAgendaGroups(selectedCommittee);
+      nextPreviews = [
+        createMeetingPreview(
+          "committee",
+          [],
+          [],
+          normalizeText(`${selectedCommittee.date} ${selectedCommittee.nature}`) || `台账第${selectedCommittee.sourceRowNumber}行`,
+          agendaGroups,
+          meetingTemplates.committee
+        ),
+        createMeetingPreview(
+          "party",
+          [],
+          [],
+          normalizeText(`${selectedParty.date} ${selectedParty.nature}`) || `台账第${selectedParty.sourceRowNumber}行`,
+          agendaGroups,
+          meetingTemplates.party
+        )
+      ];
+    } else {
+      const agendaGroups = ledgerRowToAgendaGroups(row);
+      nextPreviews = [
+        createMeetingPreview(
+          kind,
+          [],
+          [],
+          normalizeText(`${row.date} ${row.nature}`) || `台账第${row.sourceRowNumber}行`,
+          agendaGroups,
+          meetingTemplates[kind]
+        )
+      ];
+    }
+
+    if (!nextPreviews.length) {
+      setStatus("没有找到可以生成会议记录的议题内容。");
+      return;
+    }
+
+    ledgerScrollTopRef.current = window.scrollY;
+    openMeetingPreviews(nextPreviews, "ledger");
+    setStatus(nextPreviews.length === 2 ? "已联动生成支委会和党员大会预览。" : "已生成当前台账行的会议记录预览。");
   }
 
   function updateTopic(kind: TopicKind, id: string, patch: Partial<Pick<TopicEntry, "title" | "content">>) {
@@ -557,18 +1108,47 @@ export default function Home() {
     }
   }
 
+  if (viewMode === "ledger") {
+    return (
+      <LedgerPage
+        activeSheetError={ledgerSheetErrors[activeLedgerSheetId] ?? ""}
+        activeSheetId={activeLedgerSheetId}
+        fileName={ledgerFileName}
+        inputRef={ledgerWorkbookInputRef}
+        ledgerLoading={ledgerLoading}
+        onCellFiles={(rowId, cellIndex, files) => void handleLedgerCellFiles(rowId, cellIndex, files)}
+        onCellSourceChange={updateLedgerCellSource}
+        onCellTopicChange={updateLedgerCellTopic}
+        onCellTopicRemove={removeLedgerCellTopic}
+        onGenerateRow={generateLedgerRow}
+        onImportWorkbook={(event) => void importLedgerWorkbookFile(event)}
+        onOpenLegacy={() => setViewMode("main")}
+        onOpenTemplates={() => openTemplateConfig("ledger")}
+        onRowSelect={toggleLedgerRowSelection}
+        onSheetChange={selectLedgerSheet}
+        onSourceCellChange={updateLedgerSourceCell}
+        selectedRows={selectedLedgerRows}
+        sheets={ledgerSheets}
+        statusNotice={statusNotice}
+        workbook={ledgerWorkbook}
+      />
+    );
+  }
+
   if (viewMode === "preview" && preview) {
     return (
       <PreviewPage
         activePromptId={activePromptId}
+        activeDiscussionKey={activeDiscussionKey}
         applySpeechResult={applySpeechResult}
         copyLastPrompt={() => void copyLastPrompt()}
+        downloadAllPreviewDocuments={() => void downloadAllPreviewDocuments()}
         downloadPreviewDocument={() => void downloadPreviewDocument()}
         generateSpeeches={generateSpeeches}
         lastPrompt={lastPrompt}
         onBack={() => {
-          setViewMode("main");
-          setStatus("已返回议题编辑页面。");
+          setViewMode(previewReturnMode);
+          setStatus(previewReturnMode === "ledger" ? "已返回台账页面。" : "已返回议题编辑页面。");
         }}
         onOpenDoubao={() => void openDoubaoWeb()}
         onOpenPersonnel={() => {
@@ -579,10 +1159,21 @@ export default function Home() {
           previewScrollTopRef.current = window.scrollY;
           setViewMode("prompt");
         }}
+        onOpenTemplateConfig={() => openTemplateConfig("preview")}
         onPromptSelect={setActivePromptId}
+        onPreviewSelect={(index) => {
+          setActivePreviewIndex(index);
+          setLastPrompt("");
+          setLastPromptDiscussionKey("");
+          setSpeechResultText("");
+          setActiveDiscussionKey(getDiscussionTargets(previews[index]?.baseLines ?? [])[0]?.key ?? "");
+        }}
+        onDiscussionSelect={setActiveDiscussionKey}
         onSpeechResultChange={setSpeechResultText}
         personnel={personnel}
         preview={preview}
+        previews={previews}
+        activePreviewIndex={activePreviewIndex}
         promptTemplates={promptTemplates}
         selectedPersonnel={selectedPersonnel}
         speechResultText={speechResultText}
@@ -605,6 +1196,7 @@ export default function Home() {
         onBranchChange={setActiveBranch}
         onFormChange={setPersonnelForm}
         onFormSubmit={addOrUpdatePerson}
+        onPersonCommitteeMemberChange={updatePersonCommitteeMember}
         onPersonHostChange={updatePersonHost}
         onPersonRemove={removePerson}
         onPersonSelect={togglePersonSelection}
@@ -638,6 +1230,19 @@ export default function Home() {
     );
   }
 
+  if (viewMode === "templates") {
+    return (
+      <TemplateConfigPage
+        onBack={() => setViewMode(templateReturnMode)}
+        onMove={moveMeetingTemplateModule}
+        onReorder={reorderMeetingTemplate}
+        onReset={resetMeetingTemplate}
+        templates={meetingTemplates}
+        statusNotice={statusNotice}
+      />
+    );
+  }
+
   return (
     <main className="matte-flow relative min-h-screen overflow-x-hidden px-4 py-6 text-slate-50 sm:px-6 lg:px-8">
       <div className="silk-line pointer-events-none" />
@@ -656,6 +1261,20 @@ export default function Home() {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
+            <button
+              className="rounded-md border border-white/10 px-5 py-3 text-sm text-slate-200 transition hover:bg-white/10"
+              onClick={() => setViewMode("ledger")}
+              type="button"
+            >
+              返回台账
+            </button>
+            <button
+              className="rounded-md border border-white/10 px-5 py-3 text-sm text-slate-200 transition hover:bg-white/10"
+              onClick={() => openTemplateConfig("main")}
+              type="button"
+            >
+              会议模板
+            </button>
             <button
               className="gradient-button rounded-md px-5 py-3 text-sm font-medium text-white"
               onClick={() => setShowFormat((value) => !value)}
@@ -742,10 +1361,419 @@ export default function Home() {
   );
 }
 
+function LedgerPage({
+  activeSheetError,
+  activeSheetId,
+  fileName,
+  inputRef,
+  ledgerLoading,
+  onCellFiles,
+  onCellSourceChange,
+  onCellTopicChange,
+  onCellTopicRemove,
+  onGenerateRow,
+  onImportWorkbook,
+  onOpenLegacy,
+  onOpenTemplates,
+  onRowSelect,
+  onSheetChange,
+  onSourceCellChange,
+  selectedRows,
+  sheets,
+  statusNotice,
+  workbook
+}: {
+  activeSheetError: string;
+  activeSheetId: string;
+  fileName: string;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  ledgerLoading: boolean;
+  onCellFiles: (rowId: string, cellIndex: number, files: File[]) => void;
+  onCellSourceChange: (rowId: string, cellIndex: number, value: string) => void;
+  onCellTopicChange: (
+    rowId: string,
+    cellIndex: number,
+    topicId: string,
+    patch: Partial<Pick<TopicEntry, "title" | "content">>
+  ) => void;
+  onCellTopicRemove: (rowId: string, cellIndex: number, topicId: string) => void;
+  onGenerateRow: (rowId: string) => void;
+  onImportWorkbook: (event: ChangeEvent<HTMLInputElement>) => void;
+  onOpenLegacy: () => void;
+  onOpenTemplates: () => void;
+  onRowSelect: (rowId: string) => void;
+  onSheetChange: (sheetId: string) => void;
+  onSourceCellChange: (sourceRowIndex: number, columnIndex: number, value: string) => void;
+  selectedRows: string[];
+  sheets: ImportedWorkbookSheet[];
+  statusNotice: StatusNotice | null;
+  workbook: LedgerWorkbook | null;
+}) {
+  const selectedItems = workbook?.rows.filter((row) => selectedRows.includes(row.id)) ?? [];
+  const hasSelectedCommitteeSource = selectedItems.some(
+    (row) => meetingKindFromNature(row.nature) === "committee" && ledgerRowHasUploads(row)
+  );
+  const ledgerRowsBySourceNumber = new Map((workbook?.rows ?? []).map((row) => [row.sourceRowNumber, row]));
+  const sourceColumnCount = Math.max(
+    1,
+    ...(workbook?.sourceMatrix.map((row) => row.length) ?? [0]),
+    workbook && workbook.natureColumnIndex >= 0 ? workbook.natureColumnIndex + 8 : 0
+  );
+  const visibleSourceRows = (workbook?.sourceMatrix ?? [])
+    .map((sourceRow, sourceRowIndex) => ({ sourceRow, sourceRowIndex }))
+    .filter(({ sourceRow, sourceRowIndex }) =>
+      sourceRowIndex === workbook?.headerRowIndex || sourceRow.some((value) => normalizeText(value))
+    );
+
+  return (
+    <main className="matte-flow relative min-h-screen overflow-x-hidden px-4 py-6 text-slate-50 sm:px-6 lg:px-8">
+      <div className="silk-line pointer-events-none" />
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.035)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.035)_1px,transparent_1px)] bg-[size:64px_64px] opacity-20" />
+
+      <section className="relative mx-auto flex w-full max-w-[1800px] flex-col gap-5">
+        <header className="panel flex flex-col gap-5 rounded-lg p-5 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-sm tracking-[0.24em] text-teal-200/75">MEETING LEDGER</p>
+            <h1 className="mt-2 text-3xl font-semibold text-white md:text-5xl">党建会议台账</h1>
+            <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-300 md:text-base">
+              导入 Excel，在一张表中查看、编辑、上传议题资料并生成会议记录。
+            </p>
+          </div>
+
+          <div className="flex flex-wrap gap-3">
+            <button className="rounded-md border border-white/10 px-5 py-3 text-sm text-slate-200 transition hover:bg-white/10" onClick={onOpenTemplates} type="button">
+              会议模板
+            </button>
+            <button className="rounded-md border border-white/10 px-5 py-3 text-sm text-slate-200 transition hover:bg-white/10" onClick={onOpenLegacy} type="button">
+              单独生成会议记录
+            </button>
+          </div>
+        </header>
+
+        <section className="panel rounded-lg p-5">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(240px,360px)_auto] lg:items-end">
+            <div>
+              <p className="text-sm text-slate-300">Excel 文件</p>
+              <p className="mt-2 truncate text-base font-medium text-white">{fileName || "尚未导入文件"}</p>
+              <p className="mt-1 text-xs text-slate-500">支持 .xlsx；文件只在当前浏览器中读取，不会上传到服务器。</p>
+            </div>
+
+            <label className="flex flex-col gap-2 text-sm text-slate-300">
+              工作表
+              <select
+                className="field rounded-md px-4 py-3 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!sheets.length}
+                onChange={(event) => onSheetChange(event.target.value)}
+                value={activeSheetId}
+              >
+                {!sheets.length ? <option value="">导入后选择工作表</option> : null}
+                {sheets.map((sheet) => (
+                  <option className="bg-zinc-950" key={sheet.id} value={sheet.id}>
+                    {sheet.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <button
+              className="gradient-button rounded-md px-6 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={ledgerLoading}
+              onClick={() => inputRef.current?.click()}
+              type="button"
+            >
+              {ledgerLoading ? "读取中" : sheets.length ? "重新导入 Excel" : "导入 Excel"}
+            </button>
+            <input
+              accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              className="hidden"
+              onChange={onImportWorkbook}
+              ref={inputRef}
+              type="file"
+            />
+          </div>
+        </section>
+
+        {!sheets.length ? (
+          <section className="panel flex min-h-64 items-center justify-center rounded-lg px-6 text-center">
+            <div>
+              <p className="text-lg font-medium text-white">导入 Excel 后开始整理台账</p>
+              <p className="mt-2 text-sm text-slate-400">文件中的所有工作表都会列出，可按需切换。</p>
+            </div>
+          </section>
+        ) : activeSheetError ? (
+          <section className="panel rounded-lg border border-amber-300/15 p-6">
+            <p className="font-medium text-amber-100">当前工作表无法生成会议台账</p>
+            <p className="mt-2 text-sm leading-6 text-slate-400">{activeSheetError}</p>
+          </section>
+        ) : null}
+
+        {workbook ? (
+          <section className="panel overflow-hidden rounded-lg">
+            <div className="flex flex-col gap-3 border-b border-white/10 px-5 py-4 lg:flex-row lg:items-end lg:justify-between">
+              <div>
+                <h2 className="text-xl font-semibold text-white">{workbook.name}</h2>
+                <p className="mt-2 text-sm leading-6 text-slate-300">
+                  {activeSheetError
+                    ? "当前为普通 Excel 编辑模式，可查看和修改单元格，但不会生成会议记录。"
+                    : `已识别 ${workbook.rows.length} 行；完整保留源表，第一资料列作为第一议题，其余列作为其它议题。`}
+                </p>
+              </div>
+              <div className="text-sm text-slate-300">
+                {selectedItems.length
+                  ? `已选择：${selectedItems.map((row) => `${row.date || `第${row.sourceRowNumber}行`} ${row.nature}`).join("、")}`
+                  : "可各选择一行支委会和党员大会进行联动生成"}
+              </div>
+            </div>
+
+            <div className="border-b border-white/10 px-5 py-3 text-xs text-slate-400">
+              {activeSheetError
+                ? "工作表内容完整保留在下方，所有可见单元格都可以直接修改文字。"
+                : "源表完整保留在下方：普通格可直接修改文字；“三会一课性质”后 7 列中的有效内容格会同时提供议题文件上传。"}
+            </div>
+            <div className="max-h-[72vh] overflow-auto">
+              <table className="min-w-[1560px] table-auto border-collapse text-left text-sm">
+                <tbody>
+                  {visibleSourceRows.map(({ sourceRow, sourceRowIndex }) => {
+                    const sourceRowNumber = sourceRowIndex + 1;
+                    const row = ledgerRowsBySourceNumber.get(sourceRowNumber);
+                    const kind = row ? meetingKindFromNature(row.nature) : null;
+                    const isTopicLabelRow = row ? isLedgerTopicLabelRow(row) : false;
+                    const hasUploads = row ? ledgerRowHasUploads(row) : false;
+                    const selected = row ? selectedRows.includes(row.id) : false;
+                    const canSelect = Boolean(
+                      row && !isTopicLabelRow && kind && (hasUploads || (kind === "party" && hasSelectedCommitteeSource))
+                    );
+                    const isHeaderRow = sourceRowIndex === workbook.headerRowIndex;
+                    const isTitleRow =
+                      sourceRowIndex === 0 && sourceRowIndex !== workbook.headerRowIndex && sourceRow.some((value) => normalizeText(value));
+                    const titleCellIndex = Math.max(0, sourceRow.findIndex((value) => normalizeText(value)));
+
+                    if (isTitleRow) {
+                      const titleValue = normalizeText(sourceRow[titleCellIndex] ?? "");
+                      return (
+                        <tr className="bg-white/[0.025]" key={`source-row-${sourceRowNumber}`}>
+                          <td className="border-b border-white/10 px-5 py-4 text-center align-middle" colSpan={sourceColumnCount + 1}>
+                            <textarea
+                              aria-label="表格标题"
+                              className="min-h-8 w-full resize-y bg-transparent text-center text-base font-semibold leading-6 text-white outline-none"
+                              onChange={(event) => onSourceCellChange(sourceRowIndex, titleCellIndex, event.target.value)}
+                              rows={titleValue.includes("\n") ? Math.min(4, titleValue.split("\n").length) : 1}
+                              value={titleValue}
+                            />
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return (
+                      <tr className={selected ? "bg-teal-300/[0.055]" : "bg-transparent"} key={`source-row-${sourceRowNumber}`}>
+                        {Array.from({ length: sourceColumnCount }, (_, columnIndex) => {
+                          const cellIndex = columnIndex - workbook.natureColumnIndex - 1;
+                          const isInteractiveColumn = workbook.natureColumnIndex >= 0 && cellIndex >= 0 && cellIndex < 7;
+                          const cell = row && isInteractiveColumn ? row.cells[cellIndex] : null;
+                          const isInteractiveCell = Boolean(cell && !isTopicLabelRow && ledgerCellHasContent(cell));
+                          const rawValue = normalizeText(sourceRow[columnIndex] ?? "");
+
+                          return (
+                            <td
+                              className={`border-b border-r border-white/10 align-top ${
+                                isHeaderRow
+                                  ? "sticky top-0 z-20 bg-zinc-950/95 p-3 font-semibold text-white"
+                                  : isInteractiveCell
+                                    ? "min-w-[300px] bg-teal-300/[0.035] p-3"
+                                    : isInteractiveColumn
+                                      ? "min-w-40 bg-white/[0.018] p-3"
+                                      : "min-w-32 p-3"
+                              }`}
+                              key={`source-cell-${sourceRowNumber}-${columnIndex}`}
+                            >
+                              {isInteractiveCell && cell && row ? (
+                                <LedgerCellEditor
+                                  cell={cell}
+                                  cellIndex={cellIndex}
+                                  onFiles={(files) => onCellFiles(row.id, cellIndex, files)}
+                                  onSourceChange={(value) => onCellSourceChange(row.id, cellIndex, value)}
+                                  onTopicChange={(topicId, topicPatch) => onCellTopicChange(row.id, cellIndex, topicId, topicPatch)}
+                                  onTopicRemove={(topicId) => onCellTopicRemove(row.id, cellIndex, topicId)}
+                                />
+                              ) : (
+                                <textarea
+                                  aria-label={`源表第${sourceRowNumber}行第${columnIndex + 1}列`}
+                                  className={`min-h-8 w-full resize-y bg-transparent leading-5 outline-none placeholder:text-slate-700 ${
+                                    isHeaderRow ? "font-semibold text-white" : "text-slate-300 focus:text-white"
+                                  }`}
+                                  onChange={(event) => onSourceCellChange(sourceRowIndex, columnIndex, event.target.value)}
+                                  placeholder="—"
+                                  rows={rawValue.includes("\n") ? Math.min(4, rawValue.split("\n").length) : 1}
+                                  value={rawValue}
+                                />
+                              )}
+                            </td>
+                          );
+                        })}
+                        <td
+                          className={`sticky right-0 z-10 min-w-44 border-b border-l border-white/10 p-3 align-top ${
+                            isHeaderRow ? "top-0 z-30 bg-zinc-950/95 font-semibold text-white" : selected ? "bg-[#113238]" : "bg-zinc-950/95"
+                          }`}
+                        >
+                          {isHeaderRow ? (
+                            "操作"
+                          ) : row && !isTopicLabelRow ? (
+                            <div className="flex min-w-36 flex-col gap-2">
+                              <label className="flex items-center gap-2 text-xs text-slate-300">
+                                <input
+                                  aria-label={`选择${row.date || `第${row.sourceRowNumber}行`}`}
+                                  checked={selected}
+                                  className="h-4 w-4 accent-teal-400"
+                                  disabled={!canSelect}
+                                  onChange={() => onRowSelect(row.id)}
+                                  type="checkbox"
+                                />
+                                联动选择
+                              </label>
+                              {hasUploads ? (
+                                <button
+                                  className="gradient-button rounded-md px-4 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-45"
+                                  disabled={!kind}
+                                  onClick={() => onGenerateRow(row.id)}
+                                  title={kind ? "生成会议记录" : "请先在台账中标明党员大会或支委会"}
+                                  type="button"
+                                >
+                                  生成
+                                </button>
+                              ) : (
+                                <span className="text-xs leading-5 text-slate-500">
+                                  {kind === "party" && hasSelectedCommitteeSource ? "可联动使用支委会资料" : "暂无已上传议题文件"}
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-slate-600">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        ) : null}
+
+        <StatusToast notice={statusNotice} />
+      </section>
+    </main>
+  );
+}
+
+function LedgerCellEditor({
+  cell,
+  cellIndex,
+  onFiles,
+  onSourceChange,
+  onTopicChange,
+  onTopicRemove
+}: {
+  cell: LedgerCell;
+  cellIndex: number;
+  onFiles: (files: File[]) => void;
+  onSourceChange: (value: string) => void;
+  onTopicChange: (topicId: string, patch: Partial<Pick<TopicEntry, "title" | "content">>) => void;
+  onTopicRemove: (topicId: string) => void;
+}) {
+  const [dragActive, setDragActive] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setDragActive(false);
+    onFiles(Array.from(event.dataTransfer.files));
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      <label className="flex flex-col gap-1.5 text-xs text-slate-400">
+        台账原文
+        <textarea
+          className="field min-h-16 resize-y rounded-md p-2 text-sm leading-5"
+          onChange={(event) => onSourceChange(event.target.value)}
+          placeholder="当前单元格为空"
+          value={cell.sourceText}
+        />
+      </label>
+
+      {cell.topics.map((topic, index) => (
+        <div className="rounded-md border border-white/10 bg-white/[0.035] p-2" key={topic.id}>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-xs text-teal-200">{index + 1}</span>
+            <button className="text-xs text-rose-200 transition hover:text-rose-100" onClick={() => onTopicRemove(topic.id)} type="button">
+              删除
+            </button>
+          </div>
+          <input
+            aria-label={`文件${index + 1}标题`}
+            className="field mb-2 w-full rounded-md px-2 py-1.5 text-sm"
+            onChange={(event) => onTopicChange(topic.id, { title: event.target.value })}
+            value={topic.title}
+          />
+          <textarea
+            aria-label={`文件${index + 1}提取内容`}
+            className="field min-h-20 w-full resize-y rounded-md p-2 text-sm leading-5"
+            onChange={(event) => onTopicChange(topic.id, { content: event.target.value })}
+            value={topic.content}
+          />
+        </div>
+      ))}
+
+      <div
+        className={`mt-auto flex min-h-16 items-center justify-center gap-3 rounded-md border border-dashed px-3 py-2.5 text-center transition ${
+          dragActive
+            ? "border-emerald-300 bg-emerald-300/10 text-emerald-100"
+            : "border-white/15 bg-white/[0.025] text-slate-400 hover:border-teal-300/35 hover:bg-teal-300/[0.04]"
+        }`}
+        onDragEnter={(event) => {
+          event.preventDefault();
+          setDragActive(true);
+        }}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          const nextTarget = event.relatedTarget;
+          if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+            setDragActive(false);
+          }
+        }}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={handleDrop}
+      >
+        <span className={`text-2xl leading-none ${dragActive ? "text-emerald-300" : "text-teal-200"}`}>+</span>
+        <button className="text-sm font-medium text-slate-100" onClick={() => inputRef.current?.click()} type="button">
+          上传文件
+        </button>
+        <span className="hidden text-xs text-slate-500 sm:inline">PDF / DOCX，可拖放</span>
+        <input
+          accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          className="hidden"
+          multiple
+          onChange={(event) => {
+            onFiles(Array.from(event.target.files ?? []));
+            event.target.value = "";
+          }}
+          ref={inputRef}
+          type="file"
+        />
+      </div>
+      <span className="sr-only">{cellIndex === 0 ? "第一议题资料" : "其它议题资料"}</span>
+    </div>
+  );
+}
+
 function PreviewPage({
   activePromptId,
+  activeDiscussionKey,
+  activePreviewIndex,
   applySpeechResult,
   copyLastPrompt,
+  downloadAllPreviewDocuments,
   downloadPreviewDocument,
   generateSpeeches,
   lastPrompt,
@@ -753,18 +1781,25 @@ function PreviewPage({
   onOpenDoubao,
   onOpenPersonnel,
   onOpenPromptConfig,
+  onOpenTemplateConfig,
+  onDiscussionSelect,
   onPromptSelect,
+  onPreviewSelect,
   onSpeechResultChange,
   personnel,
   preview,
+  previews,
   promptTemplates,
   selectedPersonnel,
   speechResultText,
   statusNotice
 }: {
   activePromptId: string;
+  activeDiscussionKey: string;
+  activePreviewIndex: number;
   applySpeechResult: () => void;
   copyLastPrompt: () => void;
+  downloadAllPreviewDocuments: () => void;
   downloadPreviewDocument: () => void;
   generateSpeeches: () => void;
   lastPrompt: string;
@@ -772,18 +1807,23 @@ function PreviewPage({
   onOpenDoubao: () => void;
   onOpenPersonnel: () => void;
   onOpenPromptConfig: () => void;
+  onOpenTemplateConfig: () => void;
+  onDiscussionSelect: (key: string) => void;
   onPromptSelect: (id: string) => void;
+  onPreviewSelect: (index: number) => void;
   onSpeechResultChange: (value: string) => void;
   personnel: PersonnelState;
   preview: MeetingPreview;
+  previews: MeetingPreview[];
   promptTemplates: PromptTemplate[];
   selectedPersonnel: SelectionState;
   speechResultText: string;
   statusNotice: StatusNotice | null;
 }) {
-  const selectedCount = collectSelectedPersonnel(personnel, selectedPersonnel).length;
+  const selectedCount = collectMeetingSpeakers(preview.kind, personnel, selectedPersonnel).length;
   const hostName = getSelectedHostName(personnel, selectedPersonnel);
   const renderedLines = renderMeetingLines(preview.lines, hostName);
+  const discussionTargets = getDiscussionTargets(preview.baseLines);
 
   return (
     <main className="matte-flow relative min-h-screen overflow-x-hidden px-4 py-6 text-slate-50 sm:px-6 lg:px-8">
@@ -798,7 +1838,7 @@ function PreviewPage({
               {preview.kind === "party" ? "党员大会会议记录预览" : "支委会会议记录预览"}
             </h1>
             <p className="mt-2 text-sm leading-6 text-slate-300">
-              预览内容会作为最终 Word 的正文来源，交流发言生成后会直接插入这里。
+              {preview.sourceLabel ? `${preview.sourceLabel}。` : ""}预览内容会作为最终 Word 的正文来源，交流发言生成后会直接插入这里。
             </p>
           </div>
 
@@ -806,11 +1846,39 @@ function PreviewPage({
             <button className="rounded-md border border-white/10 px-4 py-3 text-sm text-slate-200 transition hover:bg-white/10" onClick={onBack} type="button">
               返回编辑
             </button>
+            <button className="rounded-md border border-white/10 px-4 py-3 text-sm text-slate-200 transition hover:bg-white/10" onClick={onOpenTemplateConfig} type="button">
+              会议模板
+            </button>
             <button className="gradient-button rounded-md px-5 py-3 text-sm font-semibold text-white" onClick={downloadPreviewDocument} type="button">
               下载 Word
             </button>
+            {previews.length > 1 ? (
+              <button className="gradient-button rounded-md px-5 py-3 text-sm font-semibold text-white" onClick={downloadAllPreviewDocuments} type="button">
+                下载全部 ZIP
+              </button>
+            ) : null}
           </div>
         </header>
+
+        {previews.length > 1 ? (
+          <nav aria-label="会议记录预览切换" className="panel flex flex-wrap gap-2 rounded-lg p-2">
+            {previews.map((item, index) => (
+              <button
+                className={`rounded-md px-4 py-2.5 text-sm transition ${
+                  activePreviewIndex === index
+                    ? "bg-teal-300/15 text-teal-100"
+                    : "text-slate-300 hover:bg-white/[0.06] hover:text-white"
+                }`}
+                key={`${item.kind}-${item.sourceLabel ?? index}`}
+                onClick={() => onPreviewSelect(index)}
+                type="button"
+              >
+                {item.kind === "party" ? "党员大会" : "支委会"}
+                {item.sourceLabel ? ` · ${item.sourceLabel}` : ""}
+              </button>
+            ))}
+          </nav>
+        ) : null}
 
         <section className="panel rounded-lg p-5">
           <div className="mx-auto max-w-4xl rounded-md bg-white px-8 py-10 text-zinc-950 shadow-2xl md:px-14">
@@ -846,6 +1914,23 @@ function PreviewPage({
               </button>
             </div>
           </div>
+
+          {discussionTargets.length > 1 ? (
+            <label className="mt-4 flex flex-col gap-2 text-sm text-slate-300">
+              本次生成对应的交流发言位置
+              <select
+                className="field rounded-md px-3 py-2"
+                onChange={(event) => onDiscussionSelect(event.target.value)}
+                value={activeDiscussionKey}
+              >
+                {discussionTargets.map((target) => (
+                  <option className="bg-zinc-950" key={target.key} value={target.key}>
+                    {target.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
 
           <div className="mt-5 grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
             <label className="flex flex-col gap-2 text-sm text-slate-300">
@@ -1130,6 +2215,7 @@ function PersonnelPage({
   onBranchChange,
   onFormChange,
   onFormSubmit,
+  onPersonCommitteeMemberChange,
   onPersonHostChange,
   onPersonRemove,
   onPersonSelect,
@@ -1150,6 +2236,7 @@ function PersonnelPage({
   onBranchChange: (branch: BranchName) => void;
   onFormChange: (form: PersonnelForm) => void;
   onFormSubmit: () => void;
+  onPersonCommitteeMemberChange: (branch: BranchName, id: string, isCommitteeMember: boolean) => void;
   onPersonHostChange: (branch: BranchName, id: string, isHost: boolean) => void;
   onPersonRemove: (branch: BranchName, id: string) => void;
   onPersonSelect: (branch: BranchName, id: string) => void;
@@ -1190,6 +2277,7 @@ function PersonnelPage({
           onBranchChange={onBranchChange}
           onFormChange={onFormChange}
           onFormSubmit={onFormSubmit}
+          onPersonCommitteeMemberChange={onPersonCommitteeMemberChange}
           onPersonHostChange={onPersonHostChange}
           onPersonRemove={onPersonRemove}
           onPersonSelect={onPersonSelect}
@@ -1216,6 +2304,7 @@ function PersonnelConfigPanel({
   onBranchChange,
   onFormChange,
   onFormSubmit,
+  onPersonCommitteeMemberChange,
   onPersonHostChange,
   onPersonRemove,
   onPersonSelect,
@@ -1234,6 +2323,7 @@ function PersonnelConfigPanel({
   onBranchChange: (branch: BranchName) => void;
   onFormChange: (form: PersonnelForm) => void;
   onFormSubmit: () => void;
+  onPersonCommitteeMemberChange: (branch: BranchName, id: string, isCommitteeMember: boolean) => void;
   onPersonHostChange: (branch: BranchName, id: string, isHost: boolean) => void;
   onPersonRemove: (branch: BranchName, id: string) => void;
   onPersonSelect: (branch: BranchName, id: string) => void;
@@ -1270,7 +2360,7 @@ function PersonnelConfigPanel({
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_1fr_1.5fr_0.8fr_auto_auto]">
+      <div className="grid gap-4 lg:grid-cols-[1fr_1fr_1.5fr_0.8fr_auto_auto_auto]">
         <label className="flex flex-col gap-2 text-sm text-slate-300">
           姓名
           <input className="field rounded-md px-3 py-2" onChange={(event) => onFormChange({ ...personnelForm, name: event.target.value })} value={personnelForm.name} />
@@ -1290,6 +2380,10 @@ function PersonnelConfigPanel({
         <label className="flex items-center gap-2 self-end rounded-md border border-white/10 px-3 py-2 text-sm text-slate-300">
           <input checked={personnelForm.isHost} onChange={(event) => onFormChange({ ...personnelForm, isHost: event.target.checked })} type="checkbox" />
           主持人
+        </label>
+        <label className="flex items-center gap-2 self-end rounded-md border border-white/10 px-3 py-2 text-sm text-slate-300">
+          <input checked={personnelForm.isCommitteeMember} onChange={(event) => onFormChange({ ...personnelForm, isCommitteeMember: event.target.checked })} type="checkbox" />
+          支委
         </label>
         <button className="gradient-button self-end rounded-md px-4 py-3 text-sm font-semibold text-white" onClick={onFormSubmit} type="button">
           {editingPersonId ? "保存修改" : "生成条目"}
@@ -1313,20 +2407,21 @@ function PersonnelConfigPanel({
       </div>
 
       <div className="mt-5 overflow-hidden rounded-lg border border-white/10">
-        <div className="hidden grid-cols-[72px_minmax(100px,0.7fr)_minmax(130px,0.9fr)_minmax(240px,1.5fr)_120px_86px_120px] gap-3 border-b border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-slate-300 xl:grid">
+        <div className="hidden grid-cols-[72px_minmax(100px,0.7fr)_minmax(130px,0.9fr)_minmax(240px,1.5fr)_120px_86px_86px_120px] gap-3 border-b border-white/10 bg-white/[0.04] px-4 py-3 text-sm text-slate-300 xl:grid">
           <span>勾选</span>
           <span>姓名</span>
           <span>岗位身份</span>
           <span>主要工作内容</span>
           <span>发言字数</span>
           <span>主持人</span>
+          <span>支委</span>
           <span>操作</span>
         </div>
 
         {currentPeople.length ? (
           currentPeople.map((person) => (
             <div
-              className="grid grid-cols-1 gap-3 border-b border-white/10 p-4 last:border-b-0 xl:grid-cols-[72px_minmax(100px,0.7fr)_minmax(130px,0.9fr)_minmax(240px,1.5fr)_120px_86px_120px]"
+              className="grid grid-cols-1 gap-3 border-b border-white/10 p-4 last:border-b-0 xl:grid-cols-[72px_minmax(100px,0.7fr)_minmax(130px,0.9fr)_minmax(240px,1.5fr)_120px_86px_86px_120px]"
               key={person.id}
             >
               <label className="flex items-center gap-2 text-sm text-slate-300">
@@ -1339,6 +2434,10 @@ function PersonnelConfigPanel({
               <p className="text-sm leading-6 text-slate-300">{person.wordCount}</p>
               <label className="flex items-center gap-2 text-sm text-slate-300">
                 <input checked={person.isHost} onChange={(event) => onPersonHostChange(activeBranch, person.id, event.target.checked)} type="checkbox" />
+                是
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input checked={person.isCommitteeMember} onChange={(event) => onPersonCommitteeMemberChange(activeBranch, person.id, event.target.checked)} type="checkbox" />
                 是
               </label>
               <div className="flex gap-2">
@@ -1472,6 +2571,157 @@ function TopicPanel({
   );
 }
 
+function TemplateConfigPage({
+  onBack,
+  onMove,
+  onReorder,
+  onReset,
+  statusNotice,
+  templates
+}: {
+  onBack: () => void;
+  onMove: (kind: MeetingKind, module: TemplateModuleKind, direction: -1 | 1) => void;
+  onReorder: (kind: MeetingKind, source: TemplateModuleKind, target: TemplateModuleKind) => void;
+  onReset: (kind: MeetingKind) => void;
+  statusNotice: StatusNotice | null;
+  templates: MeetingTemplateState;
+}) {
+  const [activeKind, setActiveKind] = useState<MeetingKind>("party");
+  const modules = templates[activeKind];
+  const categoryStyle: Record<TemplateModuleCategory, string> = {
+    meeting: "border-sky-300/30 bg-sky-300/[0.08]",
+    agenda: "border-violet-300/30 bg-violet-300/[0.08]",
+    host: "border-amber-300/30 bg-amber-300/[0.08]",
+    material: "border-fuchsia-300/30 bg-fuchsia-300/[0.08]",
+    speech: "border-teal-300/30 bg-teal-300/[0.08]"
+  };
+  const categoryName: Record<TemplateModuleCategory, string> = {
+    meeting: "会议情况",
+    agenda: "议题",
+    host: "主持",
+    material: "材料",
+    speech: "交流发言"
+  };
+
+  function handleDrop(event: DragEvent<HTMLDivElement>, target: TemplateModuleKind) {
+    event.preventDefault();
+    const source = event.dataTransfer.getData("text/plain") as TemplateModuleKind;
+    if (source && templateModuleInfo[source]) {
+      onReorder(activeKind, source, target);
+    }
+  }
+
+  return (
+    <main className="matte-flow relative min-h-screen overflow-x-hidden px-4 py-6 text-slate-50 sm:px-6 lg:px-8">
+      <div className="silk-line pointer-events-none" />
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.035)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.035)_1px,transparent_1px)] bg-[size:64px_64px] opacity-20" />
+
+      <section className="relative mx-auto flex w-full max-w-5xl flex-col gap-5">
+        <header className="panel flex flex-col gap-4 rounded-lg p-5 md:flex-row md:items-end md:justify-between">
+          <div>
+            <p className="text-sm tracking-[0.24em] text-teal-200/75">MEETING TEMPLATE</p>
+            <h1 className="mt-2 text-3xl font-semibold text-white">会议模板配置</h1>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">
+              拖动模块调整生成顺序。每个模块均绑定固定的会议内容；支委会的每个文件标题后会生成一个独立的交流发言位置。
+            </p>
+          </div>
+          <button className="gradient-button rounded-md px-5 py-3 text-sm font-semibold text-white" onClick={onBack} type="button">
+            返回
+          </button>
+        </header>
+
+        <section className="panel rounded-lg p-3">
+          <div className="flex flex-wrap gap-2" role="tablist" aria-label="会议模板类型">
+            {(["party", "committee"] as MeetingKind[]).map((kind) => (
+              <button
+                aria-selected={activeKind === kind}
+                className={`rounded-md px-4 py-2.5 text-sm transition ${
+                  activeKind === kind ? "bg-teal-300/15 text-teal-100" : "text-slate-300 hover:bg-white/[0.06] hover:text-white"
+                }`}
+                key={kind}
+                onClick={() => setActiveKind(kind)}
+                role="tab"
+                type="button"
+              >
+                {kind === "party" ? "党员大会" : "支委会"}
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="panel rounded-lg p-5">
+          <div className="flex flex-col gap-4 border-b border-white/10 pb-4 md:flex-row md:items-center md:justify-between">
+            <div className="flex flex-wrap gap-2 text-xs">
+              {(["meeting", "agenda", "host", "material", "speech"] as TemplateModuleCategory[]).map((category) => (
+                <span className={`rounded-full border px-3 py-1.5 ${categoryStyle[category]}`} key={category}>
+                  {categoryName[category]}
+                </span>
+              ))}
+            </div>
+            <button
+              className="rounded-md border border-white/10 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+              onClick={() => onReset(activeKind)}
+              type="button"
+            >
+              恢复默认顺序
+            </button>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-2">
+            {modules.map((module, index) => {
+              const info = templateModuleInfo[module];
+              return (
+                <div
+                  className={`flex items-center gap-3 rounded-md border p-3 transition ${categoryStyle[info.category]}`}
+                  draggable
+                  key={module}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", module);
+                  }}
+                  onDrop={(event) => handleDrop(event, module)}
+                >
+                  <div className="w-7 shrink-0 text-center text-xs font-semibold text-slate-400">{index + 1}</div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="font-medium text-white">{info.label}</h2>
+                      <span className="rounded-full border border-white/10 bg-black/15 px-2 py-0.5 text-[11px] text-slate-300">{categoryName[info.category]}</span>
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-slate-300">{info.description}</p>
+                  </div>
+                  <div className="flex shrink-0 gap-1">
+                    <button
+                      aria-label={`上移${info.label}`}
+                      className="rounded border border-white/10 px-2 py-1 text-xs text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-35"
+                      disabled={index === 0}
+                      onClick={() => onMove(activeKind, module, -1)}
+                      type="button"
+                    >
+                      上移
+                    </button>
+                    <button
+                      aria-label={`下移${info.label}`}
+                      className="rounded border border-white/10 px-2 py-1 text-xs text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-35"
+                      disabled={index === modules.length - 1}
+                      onClick={() => onMove(activeKind, module, 1)}
+                      type="button"
+                    >
+                      下移
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <StatusToast notice={statusNotice} />
+      </section>
+    </main>
+  );
+}
+
 function FormatPanel({
   format,
   onChange
@@ -1566,6 +2816,430 @@ function SelectField({
       </select>
     </label>
   );
+}
+
+async function loadWorkbookSheetsFromFile(file: File) {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const isZipFile = bytes[0] === 0x50 && bytes[1] === 0x4b;
+
+  if (!isZipFile || !file.name.toLowerCase().endsWith(".xlsx")) {
+    throw new Error("请选择标准的 .xlsx Excel 文件。");
+  }
+
+  return parseXlsxSheets(buffer);
+}
+
+async function parseXlsxSheets(buffer: ArrayBuffer): Promise<ImportedWorkbookSheet[]> {
+  const zip = await JSZip.loadAsync(buffer);
+  const workbookFile = zip.file("xl/workbook.xml");
+  const relationshipsFile = zip.file("xl/_rels/workbook.xml.rels");
+
+  if (!workbookFile || !relationshipsFile) {
+    throw new Error("XLSX 工作簿结构异常，无法读取工作表。");
+  }
+
+  const parser = new DOMParser();
+  const workbookXml = parser.parseFromString(await workbookFile.async("string"), "application/xml");
+  const relationshipsXml = parser.parseFromString(await relationshipsFile.async("string"), "application/xml");
+  const relationships = new Map(
+    Array.from(relationshipsXml.getElementsByTagNameNS("*", "Relationship")).map((item) => [
+      item.getAttribute("Id") ?? "",
+      item.getAttribute("Target") ?? ""
+    ])
+  );
+  const sheetNodes = Array.from(workbookXml.getElementsByTagNameNS("*", "sheet"));
+
+  const sharedStringsFile = zip.file("xl/sharedStrings.xml");
+  const sharedStrings = sharedStringsFile
+    ? Array.from(
+        parser
+          .parseFromString(await sharedStringsFile.async("string"), "application/xml")
+          .getElementsByTagNameNS("*", "si")
+      ).map((item) =>
+        Array.from(item.getElementsByTagNameNS("*", "t"))
+          .map((node) => node.textContent ?? "")
+          .join("")
+      )
+    : [];
+  const stylesFile = zip.file("xl/styles.xml");
+  const cellFormats = parseXlsxCellFormats(stylesFile ? await stylesFile.async("string") : "", parser);
+  const sheets: ImportedWorkbookSheet[] = [];
+
+  for (let index = 0; index < sheetNodes.length; index += 1) {
+    const sheetNode = sheetNodes[index];
+    const relationshipId =
+      sheetNode.getAttribute("r:id") ??
+      sheetNode.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id") ??
+      "";
+    const target = relationships.get(relationshipId) ?? "";
+    const fallbackPath = `xl/worksheets/sheet${index + 1}.xml`;
+    const sheetFile = zip.file(resolveXlsxRelationshipPath(target) || fallbackPath);
+
+    if (!sheetFile) {
+      continue;
+    }
+
+    sheets.push({
+      id: relationshipId || `sheet-${index + 1}`,
+      name: sheetNode.getAttribute("name") || `工作表${index + 1}`,
+      matrix: parseXlsxSheetMatrix(await sheetFile.async("string"), parser, sharedStrings, cellFormats)
+    });
+  }
+
+  if (!sheets.length) {
+    throw new Error("XLSX 文件中没有可读取的工作表。");
+  }
+
+  return sheets;
+}
+
+function resolveXlsxRelationshipPath(target: string) {
+  if (!target) {
+    return "";
+  }
+
+  try {
+    return new URL(target, "https://xlsx.local/xl/workbook.xml").pathname.replace(/^\//, "");
+  } catch {
+    return "";
+  }
+}
+
+function parseXlsxCellFormats(stylesText: string, parser: DOMParser): XlsxCellFormats {
+  const numFmtCodes = new Map<number, string>();
+  const styleNumFmtIds: number[] = [];
+
+  if (!stylesText) {
+    return { numFmtCodes, styleNumFmtIds };
+  }
+
+  const stylesXml = parser.parseFromString(stylesText, "application/xml");
+  for (const numFmt of Array.from(stylesXml.getElementsByTagNameNS("*", "numFmt"))) {
+    const id = Number(numFmt.getAttribute("numFmtId"));
+    const formatCode = numFmt.getAttribute("formatCode") ?? "";
+    if (Number.isFinite(id) && formatCode) {
+      numFmtCodes.set(id, formatCode);
+    }
+  }
+
+  const cellXfs = stylesXml.getElementsByTagNameNS("*", "cellXfs")[0];
+  if (cellXfs) {
+    for (const xf of Array.from(cellXfs.getElementsByTagNameNS("*", "xf"))) {
+      const numFmtId = Number(xf.getAttribute("numFmtId"));
+      styleNumFmtIds.push(Number.isFinite(numFmtId) ? numFmtId : 0);
+    }
+  }
+
+  return { numFmtCodes, styleNumFmtIds };
+}
+
+function parseXlsxSheetMatrix(
+  sheetText: string,
+  parser: DOMParser,
+  sharedStrings: string[],
+  cellFormats: XlsxCellFormats
+) {
+  const sheetXml = parser.parseFromString(sheetText, "application/xml");
+  const matrix: string[][] = [];
+
+  for (const rowNode of Array.from(sheetXml.getElementsByTagNameNS("*", "row"))) {
+    const rowNumber = Number(rowNode.getAttribute("r")) || matrix.length + 1;
+    const row = matrix[rowNumber - 1] ?? [];
+
+    for (const cell of Array.from(rowNode.getElementsByTagNameNS("*", "c"))) {
+      const reference = cell.getAttribute("r") ?? "";
+      const columnIndex = spreadsheetColumnIndex(reference);
+      const cellType = cell.getAttribute("t") ?? "";
+      const styleIndex = Number(cell.getAttribute("s"));
+      const valueNode = cell.getElementsByTagNameNS("*", "v")[0];
+      const rawValue = valueNode?.textContent ?? "";
+      let value = rawValue;
+
+      if (cellType === "s") {
+        value = sharedStrings[Number(rawValue)] ?? "";
+      } else if (cellType === "inlineStr") {
+        value = Array.from(cell.getElementsByTagNameNS("*", "t"))
+          .map((node) => node.textContent ?? "")
+          .join("");
+      } else if (cellType === "b") {
+        value = rawValue === "1" ? "是" : "否";
+      }
+
+      if (!cellType) {
+        value = formatXlsxNumericCell(rawValue, styleIndex, cellFormats);
+      }
+
+      if (columnIndex >= 0) {
+        row[columnIndex] = normalizeText(value);
+      }
+    }
+
+    matrix[rowNumber - 1] = row;
+  }
+
+  return matrix;
+}
+
+function formatXlsxNumericCell(rawValue: string, styleIndex: number, cellFormats: XlsxCellFormats) {
+  const numericValue = Number(rawValue);
+  if (!Number.isFinite(numericValue)) {
+    return rawValue;
+  }
+
+  const numFmtId = cellFormats.styleNumFmtIds[styleIndex] ?? 0;
+  const formatCode = cellFormats.numFmtCodes.get(numFmtId);
+  const kind = xlsxNumberFormatKind(numFmtId, formatCode);
+  return kind ? formatExcelSerial(numericValue, kind, formatCode, numFmtId) : rawValue;
+}
+
+function xlsxNumberFormatKind(numFmtId: number, formatCode?: string) {
+  if (numFmtId === 22) {
+    return "datetime" as const;
+  }
+  if ([14, 15, 16, 17, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 50, 51, 52, 53, 54, 55, 56, 57, 58].includes(numFmtId)) {
+    return "date" as const;
+  }
+  if ([18, 19, 20, 21, 45, 46, 47].includes(numFmtId)) {
+    return "time" as const;
+  }
+
+  const normalized = (formatCode ?? "")
+    .replace(/\\./g, "")
+    .replace(/\[[^\]]*\]/g, "")
+    .replace(/\"[^\"]*\"/g, "")
+    .toLowerCase();
+  const hasDate = /[dy]/.test(normalized);
+  const hasTime = /[hs]/.test(normalized) || normalized.includes("am/pm");
+
+  if (hasDate && hasTime) {
+    return "datetime" as const;
+  }
+  if (hasDate) {
+    return "date" as const;
+  }
+  if (hasTime) {
+    return "time" as const;
+  }
+  return null;
+}
+
+function formatExcelSerial(
+  serial: number,
+  kind: "date" | "time" | "datetime",
+  formatCode?: string,
+  numFmtId?: number
+) {
+  const baseMilliseconds = Date.UTC(1899, 11, 30);
+  let day = Math.floor(serial);
+  let seconds = Math.round((serial - day) * 86400);
+
+  if (seconds >= 86400) {
+    day += 1;
+    seconds = 0;
+  }
+
+  const date = new Date(baseMilliseconds + day * 86400000);
+  const dateText = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secondsPart = seconds % 60;
+  const showSeconds = /s/i.test(formatCode ?? "") || [19, 21, 45, 46, 47].includes(numFmtId ?? -1);
+  const timeText = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}${
+    showSeconds ? `:${String(secondsPart).padStart(2, "0")}` : ""
+  }`;
+
+  if (kind === "date") {
+    return dateText;
+  }
+  if (kind === "time") {
+    return timeText;
+  }
+  return `${dateText} ${timeText}`;
+}
+
+function spreadsheetColumnIndex(reference: string) {
+  const letters = reference.match(/^[A-Z]+/i)?.[0]?.toUpperCase() ?? "";
+  if (!letters) {
+    return -1;
+  }
+  return letters.split("").reduce((value, letter) => value * 26 + letter.charCodeAt(0) - 64, 0) - 1;
+}
+
+function createPlainWorkbook(matrix: string[][], name: string): LedgerWorkbook {
+  return {
+    name: name || "Excel 工作表",
+    dateHeader: "日期",
+    natureHeader: "三会一课性质",
+    interactiveHeaders: [],
+    sourceMatrix: matrix.map((row) => row.map((cell) => normalizeText(cell))),
+    headerRowIndex: -1,
+    dateColumnIndex: -1,
+    natureColumnIndex: -1,
+    rows: []
+  };
+}
+
+function createLedgerWorkbook(matrix: string[][], name: string): LedgerWorkbook {
+  const sourceMatrix = matrix.map((row) => row.map((cell) => normalizeText(cell)));
+  let headerRowIndex = -1;
+  let dateColumnIndex = -1;
+  let natureColumnIndex = -1;
+
+  for (let rowIndex = 0; rowIndex < sourceMatrix.length; rowIndex += 1) {
+    const normalized = sourceMatrix[rowIndex].map((cell) => compactText(cell));
+    const dateIndex = normalized.findIndex((cell) => cell === "日期" || cell.endsWith("日期"));
+    const natureIndex = normalized.findIndex((cell) => cell.includes("三会一课性质"));
+
+    if (dateIndex >= 0 && natureIndex >= 0) {
+      headerRowIndex = rowIndex;
+      dateColumnIndex = dateIndex;
+      natureColumnIndex = natureIndex;
+      break;
+    }
+  }
+
+  if (headerRowIndex < 0) {
+    throw new Error("未找到同时包含“日期”和“三会一课性质”的表头行。");
+  }
+
+  const headerRow = sourceMatrix[headerRowIndex];
+  const interactiveHeaders = Array.from({ length: 7 }, (_, index) =>
+    normalizeText(headerRow[natureColumnIndex + index + 1] ?? "") || `议题资料${index + 1}`
+  );
+  const rows = sourceMatrix
+    .map((sourceRow, rowIndex) => ({ sourceRow, rowIndex }))
+    .filter(({ sourceRow, rowIndex }) => rowIndex > headerRowIndex && sourceRow.some((value) => normalizeText(value)))
+    .map(({ sourceRow, rowIndex }) => {
+      const date = normalizeText(sourceRow[dateColumnIndex] ?? "");
+      const nature = normalizeText(sourceRow[natureColumnIndex] ?? "");
+      const cells = interactiveHeaders.map((header, cellIndex) => ({
+        id: `ledger-cell-${rowIndex}-${cellIndex}`,
+        header,
+        sourceText: normalizeText(sourceRow[natureColumnIndex + cellIndex + 1] ?? ""),
+        topics: []
+      }));
+
+      return {
+        id: `ledger-row-${rowIndex}`,
+        sourceRowNumber: rowIndex + 1,
+        date,
+        nature,
+        cells
+      } satisfies LedgerRow;
+    });
+
+  if (!rows.length) {
+    throw new Error("表头下方没有可生成的台账数据行。");
+  }
+
+  return {
+    name: name || "会议台账",
+    dateHeader: normalizeText(headerRow[dateColumnIndex] ?? "") || "日期",
+    natureHeader: normalizeText(headerRow[natureColumnIndex] ?? "") || "三会一课性质",
+    interactiveHeaders,
+    sourceMatrix,
+    headerRowIndex,
+    dateColumnIndex,
+    natureColumnIndex,
+    rows
+  };
+}
+
+function meetingKindFromNature(value: string): MeetingKind | null {
+  const normalized = compactText(value);
+  if (normalized.includes("支委会") || normalized.includes("支部委员会")) {
+    return "committee";
+  }
+  if (normalized.includes("党员大会") || normalized.includes("支部大会")) {
+    return "party";
+  }
+  return null;
+}
+
+function ledgerRowHasUploads(row: LedgerRow) {
+  return row.cells.some((cell) => cell.topics.length > 0);
+}
+
+function ledgerCellHasContent(cell: LedgerCell) {
+  return Boolean(normalizeText(cell.sourceText) || cell.topics.length);
+}
+
+function isLedgerTopicLabelRow(row: LedgerRow) {
+  const values = [row.date, row.nature, ...row.cells.map((cell) => cell.sourceText)]
+    .map((value) => normalizeText(value))
+    .filter(Boolean);
+  const hasTopicLabel = values.some(isLedgerTopicLabel);
+  const hasMeetingNature = Boolean(meetingKindFromNature(row.nature));
+  const isStandaloneTopicLabel =
+    hasTopicLabel &&
+    !hasMeetingNature &&
+    (isLedgerTopicLabel(row.date) || isLedgerTopicLabel(row.nature) || (!normalizeText(row.date) && !normalizeText(row.nature)));
+
+  return isStandaloneTopicLabel || (values.length > 0 && values.every(isLedgerTopicLabel));
+}
+
+function isLedgerTopicLabel(value: string) {
+  const normalized = compactText(value).replace(/[：:]/g, "");
+  return /^(?:第?[一二三四五六七八九十\d]+)?议题(?:[一二三四五六七八九十\d]+)?$/.test(normalized);
+}
+
+function ledgerRowToAgendaGroups(row: LedgerRow): AgendaGroup[] {
+  return row.cells
+    .map((cell, columnIndex) => ({
+      columnIndex,
+      title: normalizeText(cell.header) || `议题${columnIndex + 1}`,
+      sourceText: normalizeText(cell.sourceText),
+      uploads: normalizeTopicEntries(cell.topics),
+      isFirstAgenda: isFirstAgendaColumn(cell.header, columnIndex)
+    }))
+    .filter((group) => group.sourceText || group.uploads.length);
+}
+
+function isFirstAgendaColumn(title: string, columnIndex: number) {
+  const compactTitle = compactText(title);
+  return columnIndex === 0 || compactTitle === "议题1" || compactTitle === "议题一" || compactTitle === "第一议题";
+}
+
+function createMeetingPreview(
+  kind: MeetingKind,
+  firstEntries: TopicEntry[],
+  otherEntries: TopicEntry[],
+  sourceLabel?: string,
+  agendaGroups?: AgendaGroup[],
+  templateModules: TemplateModuleKind[] = defaultMeetingTemplates[kind]
+): MeetingPreview {
+  const groups = agendaGroups?.length ? agendaGroups : createLegacyAgendaGroups(firstEntries, otherEntries);
+  const baseLines = buildMeetingLines(kind, firstEntries, otherEntries, agendaGroups, templateModules);
+  return {
+    kind,
+    baseLines,
+    lines: baseLines,
+    sourceLabel,
+    promptSupplement: kind === "committee" ? buildCommitteePromptSupplement(groups) : ""
+  };
+}
+
+function meetingPreviewFileName(preview: MeetingPreview) {
+  const meetingName = preview.kind === "party" ? "党员大会" : "支委会";
+  const suffix = preview.sourceLabel ? `-${sanitizeFileName(preview.sourceLabel)}` : "";
+  return `${meetingName}会议记录${suffix}.docx`;
+}
+
+function sanitizeFileName(value: string) {
+  return normalizeText(value).replace(/[\\/:*?"<>|]/g, "-").slice(0, 60);
+}
+
+function formatLedgerDate(value: string) {
+  const normalized = normalizeText(value);
+  const serial = Number(normalized);
+
+  if (/^\d+(\.\d+)?$/.test(normalized) && serial >= 20000 && serial <= 80000) {
+    const date = new Date(Date.UTC(1899, 11, 30) + serial * 86400000);
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+  }
+
+  return normalized;
 }
 
 async function extractFromFile(file: File, kind: TopicKind) {
@@ -1850,8 +3524,13 @@ function createId(prefix: string) {
 function buildMeetingLines(
   kind: MeetingKind,
   firstEntries: TopicEntry[],
-  otherEntries: TopicEntry[]
+  otherEntries: TopicEntry[],
+  agendaGroups?: AgendaGroup[],
+  templateModules: TemplateModuleKind[] = defaultMeetingTemplates[kind]
 ) {
+  const groups = agendaGroups?.length ? agendaGroups : createLegacyAgendaGroups(firstEntries, otherEntries);
+  return buildTemplateMeetingLines(kind, groups, templateModules);
+
   const lines: MeetingLine[] = [];
   let order = 0;
   const addLine = (line: Omit<MeetingLine, "id">) => {
@@ -1865,18 +3544,25 @@ function buildMeetingLines(
   const otherAgendaLines = otherEntries.length
     ? otherEntries.map((entry, index) => `${index + 2}.${entry.title}`)
     : ["2.其它议题"];
+  const committeeAdditionalAgendaLines = [...firstEntries, ...otherEntries].map((entry, index) => `${index + 3}.${entry.title}`);
   const partyFirstLine = kind === "party" ? false : undefined;
 
   addLine({ text: title, variant: "main", alignment: AlignmentType.CENTER, firstLine: false });
   addBlank();
   addLine({ text: `会议名称:${meetingName}`, firstLine: partyFirstLine });
-  addLine({ text: kind === "party" ? "时间:           地点:" : "时间:", firstLine: partyFirstLine });
+  addLine({ text: "时间:\t地点:", firstLine: partyFirstLine, rightTab: true });
   addLine({ text: "参加人员:", firstLine: partyFirstLine });
   addLine({ text: "缺席人员:无", firstLine: partyFirstLine });
   addLine({ text: "列席人员:无", firstLine: partyFirstLine });
   addLine({ text: "主持人:          记录人:", firstLine: partyFirstLine, hostTemplate: "主持人:{{host}}          记录人:" });
-  addLine({ text: `议题:1.${firstTitleLine}`, firstLine: partyFirstLine });
-  otherAgendaLines.forEach((line) => addLine({ text: line }));
+  if (kind === "committee") {
+    addLine({ text: `议题:1.${fixedCommitteeAgendaTitles[0]}`, firstLine: partyFirstLine });
+    addLine({ text: `2.${fixedCommitteeAgendaTitles[1]}` });
+    committeeAdditionalAgendaLines.forEach((line) => addLine({ text: line }));
+  } else {
+    addLine({ text: `议题:1.${firstTitleLine}`, firstLine: partyFirstLine });
+    otherAgendaLines.forEach((line) => addLine({ text: line }));
+  }
   addLine({ text: "主持人:", hostTemplate: "{{host}}:" });
 
   if (firstEntries.length) {
@@ -1890,6 +3576,284 @@ function buildMeetingLines(
     const heading = `${cnNumber[firstEntries.length ? index + 1 : index] ?? index + 2}、${entry.title}`;
     addLine({ text: heading, variant: "second" });
     addLine({ text: entry.content });
+  });
+
+  addLine({ text: "主持人：根据以上议题内容，请同志们简单进行一下交流发言。", role: "discussion", hostTemplate: "{{host}}：根据以上议题内容，请同志们简单进行一下交流发言。" });
+  addBlank();
+  addLine({ text: `主持人：今天的${kind === "party" ? "支部大会" : "支委会"}，议题就这么多，散会！`, role: "closing", hostTemplate: `{{host}}：今天的${kind === "party" ? "支部大会" : "支委会"}，议题就这么多，散会！` });
+
+  return lines;
+}
+
+function buildCommitteePromptSupplement(groups: AgendaGroup[]) {
+  return [...groups]
+    .sort((left, right) => left.columnIndex - right.columnIndex)
+    .filter((group) => group.uploads.length)
+    .map((group) => {
+      const topicTitle = group.columnIndex < 2 ? fixedCommitteeAgendaTitles[group.columnIndex] : group.title;
+      const materials = group.uploads
+        .map((entry) => `材料标题：${entry.title}\n提取内容：${entry.content}`)
+        .join("\n\n");
+      return `【${topicTitle}】\n${materials}`;
+    })
+    .join("\n\n");
+}
+
+function createLegacyAgendaGroups(firstEntries: TopicEntry[], otherEntries: TopicEntry[]): AgendaGroup[] {
+  const firstUploads = normalizeTopicEntries(firstEntries);
+  return [
+    {
+      columnIndex: 0,
+      title: firstUploads.map((entry) => entry.title).join("、") || "第一议题",
+      sourceText: "",
+      uploads: firstUploads,
+      isFirstAgenda: true
+    },
+    ...normalizeTopicEntries(otherEntries).map((entry, index) => ({
+      columnIndex: index + 1,
+      title: entry.title,
+      sourceText: "",
+      uploads: [entry],
+      isFirstAgenda: false
+    }))
+  ];
+}
+
+function buildTemplateMeetingLines(
+  kind: MeetingKind,
+  agendaGroups: AgendaGroup[],
+  configuredModules: TemplateModuleKind[]
+) {
+  const lines: MeetingLine[] = [];
+  const modules = normalizeTemplateModules(kind, configuredModules);
+  const orderedGroups = [...agendaGroups].sort((left, right) => left.columnIndex - right.columnIndex);
+  const partyFirstLine = kind === "party" ? false : undefined;
+  const meetingTitle = kind === "party" ? "党员大会会议记录" : "支委会会议记录";
+  const meetingName = kind === "party" ? "支部党员大会" : "支部委员会";
+  let order = 0;
+
+  const addLine = (line: Omit<MeetingLine, "id">) => {
+    lines.push({ id: `meeting-line-${order}`, role: "base", ...line });
+    order += 1;
+  };
+  const addBlank = () => addLine({ text: "", blank: true });
+  const groupAt = (index: number) => orderedGroups.find((group) => group.columnIndex === index);
+  const firstGroup = groupAt(0);
+  const secondGroup = groupAt(1);
+  const laterGroups = orderedGroups.filter((group) => group.columnIndex >= 2);
+  const partyFileHeading = (group: AgendaGroup, entry: TopicEntry) =>
+    `${cnNumber[group.columnIndex] ?? String(group.columnIndex + 1)}、${entry.title}`;
+  const committeeTopicHeading = (group: AgendaGroup, fallback: string) =>
+    `${cnNumber[group.columnIndex] ?? String(group.columnIndex + 1)}、${fallback}`;
+  const addDiscussion = (key: string, label: string) => {
+    addLine({
+      text: "主持人：请同志们围绕以上内容进行交流发言。",
+      role: "discussion",
+      hostTemplate: "{{host}}：请同志们围绕以上内容进行交流发言。",
+      discussionKey: key,
+      discussionLabel: label
+    });
+  };
+  const addCommitteeFileTitles = (group: AgendaGroup | undefined) => {
+    group?.uploads.forEach((entry, index) => {
+      addLine({ text: `（${cnNumber[index] ?? String(index + 1)}）${entry.title}`, variant: "third" });
+    });
+  };
+  const addCommitteeExchanges = (group: AgendaGroup | undefined, topicLabel: string) => {
+    group?.uploads.forEach((entry) => {
+      addDiscussion(`committee-${group.columnIndex}-${entry.id}`, `${topicLabel}：${entry.title}`);
+    });
+  };
+  const addCommitteePairs = (group: AgendaGroup | undefined, topicLabel: string) => {
+    group?.uploads.forEach((entry, index) => {
+      addLine({ text: `（${cnNumber[index] ?? String(index + 1)}）${entry.title}`, variant: "third" });
+      addDiscussion(`committee-${group.columnIndex}-${entry.id}`, `${topicLabel}：${entry.title}`);
+    });
+  };
+
+  for (let moduleIndex = 0; moduleIndex < modules.length; moduleIndex += 1) {
+    const module = modules[moduleIndex];
+    const nextModule = modules[moduleIndex + 1];
+
+    if (module === "meeting-info") {
+      addLine({ text: meetingTitle, variant: "main", alignment: AlignmentType.CENTER, firstLine: false });
+      addBlank();
+      addLine({ text: `会议名称:${meetingName}`, firstLine: partyFirstLine });
+      addLine({ text: "时间:\t地点:", firstLine: partyFirstLine, rightTab: true });
+      addLine({ text: "参加人员:", firstLine: partyFirstLine });
+      addLine({ text: "缺席人员:无", firstLine: partyFirstLine });
+      addLine({ text: "列席人员:无", firstLine: partyFirstLine });
+      addLine({ text: "主持人:          记录人:", firstLine: partyFirstLine, hostTemplate: "主持人:{{host}}          记录人:" });
+      continue;
+    }
+
+    if (module === "agenda-list") {
+      if (kind === "committee") {
+        addLine({ text: `议题:1.${fixedCommitteeAgendaTitles[0]}`, firstLine: partyFirstLine });
+        addLine({ text: `2.${fixedCommitteeAgendaTitles[1]}` });
+        laterGroups.forEach((group) => addLine({ text: `${group.columnIndex + 1}.${group.title}` }));
+      } else {
+        orderedGroups.forEach((group, index) => {
+          const topicTitle = group.uploads.map((entry) => entry.title).join("、") || group.title;
+          addLine({
+            text: `${index === 0 ? "议题:" : ""}${group.columnIndex + 1}.${topicTitle}`,
+            firstLine: index === 0 ? partyFirstLine : undefined
+          });
+        });
+      }
+      continue;
+    }
+
+    if (module === "host-opening") {
+      addLine({ text: "主持人:", hostTemplate: "{{host}}:" });
+      continue;
+    }
+
+    if (module === "party-first-file-title") {
+      firstGroup?.uploads.forEach((entry) => addLine({ text: partyFileHeading(firstGroup, entry), variant: "second" }));
+      continue;
+    }
+    if (module === "party-first-file-content") {
+      firstGroup?.uploads.forEach((entry) => addLine({ text: entry.content }));
+      continue;
+    }
+    if (module === "party-second-file-title") {
+      secondGroup?.uploads.forEach((entry) => addLine({ text: partyFileHeading(secondGroup, entry), variant: "second" }));
+      continue;
+    }
+    if (module === "party-second-file-content") {
+      secondGroup?.uploads.forEach((entry) => addLine({ text: entry.content }));
+      continue;
+    }
+    if (module === "party-later-file-title") {
+      laterGroups.forEach((group) => group.uploads.forEach((entry) => addLine({ text: partyFileHeading(group, entry), variant: "second" })));
+      continue;
+    }
+    if (module === "party-later-file-content") {
+      laterGroups.forEach((group) => group.uploads.forEach((entry) => addLine({ text: entry.content })));
+      continue;
+    }
+    if (module === "party-exchange") {
+      addDiscussion("party-summary", "全体议题交流");
+      continue;
+    }
+
+    if (module === "committee-first-topic-title") {
+      addLine({ text: committeeTopicHeading(firstGroup ?? { columnIndex: 0 } as AgendaGroup, fixedCommitteeAgendaTitles[0]), variant: "second" });
+      continue;
+    }
+    if (module === "committee-first-file-title") {
+      if (nextModule === "committee-first-exchange") {
+        addCommitteePairs(firstGroup, fixedCommitteeAgendaTitles[0]);
+        moduleIndex += 1;
+      } else {
+        addCommitteeFileTitles(firstGroup);
+      }
+      continue;
+    }
+    if (module === "committee-first-exchange") {
+      addCommitteeExchanges(firstGroup, fixedCommitteeAgendaTitles[0]);
+      continue;
+    }
+
+    if (module === "committee-second-topic-title") {
+      addLine({ text: committeeTopicHeading(secondGroup ?? { columnIndex: 1 } as AgendaGroup, fixedCommitteeAgendaTitles[1]), variant: "second" });
+      continue;
+    }
+    if (module === "committee-second-file-title") {
+      if (nextModule === "committee-second-exchange") {
+        addCommitteePairs(secondGroup, fixedCommitteeAgendaTitles[1]);
+        moduleIndex += 1;
+      } else {
+        addCommitteeFileTitles(secondGroup);
+      }
+      continue;
+    }
+    if (module === "committee-second-exchange") {
+      addCommitteeExchanges(secondGroup, fixedCommitteeAgendaTitles[1]);
+      continue;
+    }
+
+    if (module === "committee-later-topic-title") {
+      laterGroups.forEach((group) => addLine({ text: committeeTopicHeading(group, group.title), variant: "second" }));
+      continue;
+    }
+    if (module === "committee-later-file-title") {
+      if (nextModule === "committee-later-exchange") {
+        laterGroups.forEach((group) => addCommitteePairs(group, group.title));
+        moduleIndex += 1;
+      } else {
+        laterGroups.forEach(addCommitteeFileTitles);
+      }
+      continue;
+    }
+    if (module === "committee-later-exchange") {
+      laterGroups.forEach((group) => addCommitteeExchanges(group, group.title));
+    }
+  }
+
+  addBlank();
+  addLine({
+    text: `主持人：今天的${kind === "party" ? "支部大会" : "支委会"}，议题就这么多，散会！`,
+    role: "closing",
+    hostTemplate: `{{host}}：今天的${kind === "party" ? "支部大会" : "支委会"}，议题就这么多，散会！`
+  });
+  return lines;
+}
+
+function buildGroupedMeetingLines(kind: MeetingKind, agendaGroups: AgendaGroup[]) {
+  const lines: MeetingLine[] = [];
+  let order = 0;
+  const addLine = (line: Omit<MeetingLine, "id">) => {
+    lines.push({ id: `meeting-line-${order}`, role: "base", ...line });
+    order += 1;
+  };
+  const addBlank = () => addLine({ text: "", blank: true });
+  const title = kind === "party" ? "党员大会会议记录" : "支委会会议记录";
+  const meetingName = kind === "party" ? "支部党员大会" : "支部委员会";
+  const partyFirstLine = kind === "party" ? false : undefined;
+  const orderedGroups = [...agendaGroups].sort((left, right) => left.columnIndex - right.columnIndex);
+  const agendaTitle = (group: AgendaGroup) =>
+    kind === "committee" && group.columnIndex < 2 ? fixedCommitteeAgendaTitles[group.columnIndex] : group.title;
+
+  addLine({ text: title, variant: "main", alignment: AlignmentType.CENTER, firstLine: false });
+  addBlank();
+  addLine({ text: `会议名称:${meetingName}`, firstLine: partyFirstLine });
+  addLine({ text: "时间:\t地点:", firstLine: partyFirstLine, rightTab: true });
+  addLine({ text: "参加人员:", firstLine: partyFirstLine });
+  addLine({ text: "缺席人员:无", firstLine: partyFirstLine });
+  addLine({ text: "列席人员:无", firstLine: partyFirstLine });
+  addLine({ text: "主持人:          记录人:", firstLine: partyFirstLine, hostTemplate: "主持人:{{host}}          记录人:" });
+
+  if (kind === "committee") {
+    addLine({ text: `议题:1.${fixedCommitteeAgendaTitles[0]}`, firstLine: partyFirstLine });
+    addLine({ text: `2.${fixedCommitteeAgendaTitles[1]}` });
+    orderedGroups
+      .filter((group) => group.columnIndex >= 2)
+      .forEach((group) => addLine({ text: `${group.columnIndex + 1}.${agendaTitle(group)}` }));
+  } else {
+    orderedGroups.forEach((group, index) => {
+      const prefix = group.columnIndex + 1;
+      addLine({ text: `${index === 0 ? "议题:" : ""}${prefix}.${agendaTitle(group)}`, firstLine: index === 0 ? partyFirstLine : undefined });
+    });
+  }
+
+  addLine({ text: "主持人:", hostTemplate: "{{host}}:" });
+
+  orderedGroups.forEach((group) => {
+    const headingNumber = cnNumber[group.columnIndex] ?? String(group.columnIndex + 1);
+    addLine({ text: `${headingNumber}、${agendaTitle(group)}`, variant: "second" });
+
+    if (group.sourceText) {
+      addLine({ text: group.sourceText });
+    }
+
+    group.uploads.forEach((entry) => {
+      if (!group.isFirstAgenda) {
+        addLine({ text: entry.title, variant: "third" });
+      }
+      addLine({ text: entry.content });
+    });
   });
 
   addLine({ text: "主持人：根据以上议题内容，请同志们简单进行一下交流发言。", role: "discussion", hostTemplate: "{{host}}：根据以上议题内容，请同志们简单进行一下交流发言。" });
@@ -1916,7 +3880,8 @@ function buildMeetingDocumentFromLines(lines: MeetingLine[], format: FormatSetti
 
     return makeParagraph(line.text, format, line.variant ?? "body", {
       alignment: line.alignment,
-      firstLine: line.firstLine
+      firstLine: line.firstLine,
+      rightTab: line.rightTab
     });
   });
 
@@ -2004,7 +3969,8 @@ function parsePersonnelEntries(value: unknown): PersonnelEntry[] {
         position: normalizeText(record.position ?? ""),
         work: normalizeText(record.work ?? ""),
         wordCount: normalizeText(record.wordCount ?? "") || "60 字左右",
-        isHost: Boolean(record.isHost)
+        isHost: Boolean(record.isHost),
+        isCommitteeMember: Boolean(record.isCommitteeMember)
       };
     })
     .filter((person) => person.name);
@@ -2076,12 +4042,57 @@ function parsePromptTemplates(value: unknown): PromptTemplate[] {
     .filter((template) => template.name && template.template);
 }
 
+function normalizeTemplateModules(kind: MeetingKind, value: unknown): TemplateModuleKind[] {
+  const defaults = defaultMeetingTemplates[kind];
+  const allowed = new Set<TemplateModuleKind>(defaults);
+  const provided = Array.isArray(value)
+    ? value.filter((module): module is TemplateModuleKind => typeof module === "string" && allowed.has(module as TemplateModuleKind))
+    : [];
+  const unique = Array.from(new Set(provided));
+  return [...unique, ...defaults.filter((module) => !unique.includes(module))];
+}
+
+function loadMeetingTemplateState(): MeetingTemplateState {
+  try {
+    const saved = localStorage.getItem(templateConfigStorageKey);
+    if (!saved) {
+      return {
+        party: [...defaultMeetingTemplates.party],
+        committee: [...defaultMeetingTemplates.committee]
+      };
+    }
+
+    const value = JSON.parse(saved) as Partial<Record<MeetingKind, unknown>>;
+    return {
+      party: normalizeTemplateModules("party", value.party),
+      committee: normalizeTemplateModules("committee", value.committee)
+    };
+  } catch {
+    localStorage.removeItem(templateConfigStorageKey);
+    return {
+      party: [...defaultMeetingTemplates.party],
+      committee: [...defaultMeetingTemplates.committee]
+    };
+  }
+}
+
 function collectSelectedPersonnel(personnel: PersonnelState, selected: SelectionState) {
   return branchNames.flatMap((branch) =>
     personnel[branch]
       .filter((person) => selected[branch].includes(person.id))
       .map((person) => ({ branch, person }))
   );
+}
+
+function collectMeetingSpeakers(kind: MeetingKind, personnel: PersonnelState, selected: SelectionState) {
+  const selectedPeople = collectSelectedPersonnel(personnel, selected);
+  if (kind !== "committee") {
+    return selectedPeople;
+  }
+
+  const committeeMembers = selectedPeople.filter(({ person }) => person.isCommitteeMember && !person.isHost);
+  const hosts = selectedPeople.filter(({ person }) => person.isHost);
+  return [...committeeMembers, ...hosts];
 }
 
 function getSelectedHostName(personnel: PersonnelState, selected: SelectionState) {
@@ -2103,15 +4114,16 @@ function renderMeetingLines(lines: MeetingLine[], hostName: string) {
 function formatSelectedPersonnel(selected: SelectedPerson[]) {
   return selected
     .map(({ branch, person }, index) =>
-      `${index + 1}. ${branch}：姓名：${person.name}；岗位身份：${person.position}；主要工作内容：${person.work}；发言字数：${person.wordCount}；主持人：${person.isHost ? "是" : "否"}。`
+      `${index + 1}. ${branch}：姓名：${person.name}；岗位身份：${person.position}；主要工作内容：${person.work}；发言字数：${person.wordCount}；支委：${person.isCommitteeMember ? "是" : "否"}；主持人：${person.isHost ? "是" : "否"}。`
     )
     .join("\n");
 }
 
-function buildDoubaoPrompt(personnelConfig: string, meetingContent: string, template = defaultPromptTemplateText) {
-  return template
+function buildDoubaoPrompt(personnelConfig: string, meetingContent: string, template = defaultPromptTemplateText, appendix = "") {
+  const prompt = template
     .replaceAll("{{自定义配置}}", personnelConfig)
     .replaceAll("{{会议全文内容}}", meetingContent);
+  return appendix ? `${prompt}\n\n${appendix}` : prompt;
 }
 
 function meetingLinesToPlainText(lines: MeetingLine[], hostName = "") {
@@ -2129,31 +4141,41 @@ function parseSpeechParagraphs(text: string) {
     .filter(Boolean);
 }
 
-function mergeSpeechesIntoMeeting(baseLines: MeetingLine[], speeches: string[]) {
-  const closingIndex = baseLines.findIndex((line) => line.role === "closing");
-  const insertIndex = closingIndex >= 0 ? closingIndex : baseLines.length;
+function getDiscussionTargets(lines: MeetingLine[]) {
+  return lines
+    .filter((line): line is MeetingLine & { discussionKey: string } => Boolean(line.discussionKey))
+    .map((line) => ({ key: line.discussionKey, label: line.discussionLabel || line.text }));
+}
+
+function mergeSpeechesIntoMeeting(lines: MeetingLine[], speeches: string[], discussionKey = "") {
+  const cleanedLines = discussionKey ? lines.filter((line) => line.role !== "speech" || line.discussionKey !== discussionKey) : lines;
+  const discussionIndex = discussionKey ? cleanedLines.findIndex((line) => line.discussionKey === discussionKey) : -1;
+  const closingIndex = cleanedLines.findIndex((line) => line.role === "closing");
+  const insertIndex = discussionIndex >= 0 ? discussionIndex + 1 : closingIndex >= 0 ? closingIndex : cleanedLines.length;
   const speechLines = speeches.flatMap<MeetingLine>((speech, index) => [
     {
       id: `speech-${Date.now()}-${index}`,
       text: speech,
-      role: "speech"
+      role: "speech",
+      discussionKey
     },
     {
       id: `speech-blank-${Date.now()}-${index}`,
       text: "",
       blank: true,
-      role: "speech"
+      role: "speech",
+      discussionKey
     }
   ]);
 
-  return [...baseLines.slice(0, insertIndex), ...speechLines, ...baseLines.slice(insertIndex)];
+  return [...cleanedLines.slice(0, insertIndex), ...speechLines, ...cleanedLines.slice(insertIndex)];
 }
 
 function makeParagraph(
   text: string,
   format: FormatSettings,
   variant: "body" | "main" | "second" | "third" = "body",
-  options: { alignment?: (typeof AlignmentType)[keyof typeof AlignmentType]; firstLine?: boolean } = {}
+  options: { alignment?: (typeof AlignmentType)[keyof typeof AlignmentType]; firstLine?: boolean; rightTab?: boolean } = {}
 ) {
   const font =
     variant === "main"
@@ -2177,28 +4199,34 @@ function makeParagraph(
     alignment: options.alignment,
     heading: variant === "main" ? HeadingLevel.TITLE : undefined,
     indent: firstLine ? { firstLine } : undefined,
+    tabStops: options.rightTab
+      ? [{ type: TabStopType.RIGHT, position: cmToTwip(21 - format.marginLeftCm - format.marginRightCm) }]
+      : undefined,
     spacing: {
       line: format.lineSpacingPt * 20,
       lineRule: LineRuleType.EXACT
     },
-    children: splitTextRuns(text, font, size)
+    children: splitTextRuns(text, font, size, options.rightTab)
   });
 }
 
-function splitTextRuns(text: string, font: string, sizePt: number) {
+function splitTextRuns(text: string, font: string, sizePt: number, withTabs = false) {
   const parts = text.split(/\r?\n/);
   return parts.flatMap((part, index) => {
-    const run = new TextRun({
-      text: part,
-      font,
-      size: sizePt * 2
-    });
+    const runs = withTabs
+      ? part.split("\t").flatMap((segment, tabIndex, segments) => {
+          const textRun = new TextRun({ text: segment, font, size: sizePt * 2 });
+          return tabIndex === segments.length - 1
+            ? [textRun]
+            : [textRun, new TextRun({ children: [new Tab()], font, size: sizePt * 2 })];
+        })
+      : [new TextRun({ text: part, font, size: sizePt * 2 })];
 
     if (index === parts.length - 1) {
-      return [run];
+      return runs;
     }
 
-    return [run, new TextRun({ break: 1 })];
+    return [...runs, new TextRun({ break: 1 })];
   });
 }
 
